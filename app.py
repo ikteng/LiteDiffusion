@@ -356,6 +356,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         raise gr.Error("The denoiser is still loading.")
     if not prompt or not prompt.strip():
         raise gr.Error("MiniMax-H3 always takes a prompt, keyframes or not.")
+    print(f"[prompt] {prompt!r}", flush=True)
 
     from PIL import Image, ImageOps
 
@@ -392,6 +393,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
         num_text_tokens = int(plan["num_text_tokens"])
         refined = plan.get("refined_prompt") or ""
+        if refined:
+            print(f"[prompt:upsampled] {refined!r}", flush=True)
 
     progress(
         0.1,
