@@ -30,6 +30,8 @@ Blackwell-native ComfyUI optimization path:
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
 - Each block converts its complete AdaLN table in one launch instead of six, and the final RMSNorm runs only on
   generated video/audio rows whose outputs are retained.
+- The 50 unchanged FP32 AdaLN curve projections are banked into one wide K=8 GEMM per DiT evaluation, eliminating 49
+  tiny matrix-multiplication launches while preserving every projection weight, bias, and output value.
 - Optional exact Triton AdaLN modulation/gating kernels can replace hundreds of tiny per-segment launches on
   persistent workers; they remain off on ZeroGPU because their cold compilation cost is too high.
 - Video and audio output heads run only on their own rows, not the full packed sequence.

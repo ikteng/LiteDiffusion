@@ -520,6 +520,8 @@ class H3NVFP4Transformer(nn.Module):
         self.final_layer = H3FinalLayer()
         self.register_buffer("adaln_t_table", None)
         self.register_buffer("rope_inv_freq", None)
+        self.register_parameter("adaln_bank_weight", None)
+        self.register_parameter("adaln_bank_bias", None)
         self.attention_backend = "_native_cudnn"
         self._text_cache = None
         self._rope_cache = None
@@ -554,6 +556,17 @@ class H3NVFP4Transformer(nn.Module):
             self.final_layer.load(handle, "final_layer")
             self.adaln_t_table = handle.get_tensor("adaln_t_table")
             self.rope_inv_freq = handle.get_tensor("rope.inv_freq")
+        # All 50 curve projections consume the same tiny FP32 timestep coordinate. Bank their unchanged output rows
+        # into one wide K=8 GEMM, then release the individual registrations: one launch replaces 50 per evaluation.
+        self.adaln_bank_weight = nn.Parameter(
+            torch.cat([block.adaln_proj.linear.weight for block in self.blocks], dim=0), requires_grad=False
+        )
+        self.adaln_bank_bias = nn.Parameter(
+            torch.cat([block.adaln_proj.linear.bias for block in self.blocks], dim=0), requires_grad=False
+        )
+        for block in self.blocks:
+            block.adaln_proj.linear.weight = None
+            block.adaln_proj.linear.bias = None
         # Every loaded tensor is already a frozen Parameter (or a buffer). Avoid mutating the quantized tensor
         # subclass through a redundant requires_grad_ dispatch.
         self.eval()
@@ -726,9 +739,14 @@ class H3NVFP4Transformer(nn.Module):
         segments = self._segments(adaln_indices)
         rope = self._rope(position_ids, packed.dtype)
 
-        for block in self.blocks:
-            # One conversion per small modulation table, rather than one conversion per sequence segment.
-            modulations = block.adaln_proj(time_embedding, packed.dtype)
+        # [M, L*3*6*H] -> [L, M, 3*6*H]. The transpose copy makes every layer slice contiguous; all conversion and
+        # layout work is paid once instead of in the 50-block loop.
+        modulation_bank = F.linear(time_embedding, self.adaln_bank_weight, self.adaln_bank_bias)
+        modulation_bank = modulation_bank.to(packed.dtype).view(time_embedding.shape[0], LAYERS, -1)
+        modulation_bank = modulation_bank.transpose(0, 1).contiguous()
+
+        for index, block in enumerate(self.blocks):
+            modulations = modulation_bank[index].view(-1, 6 * HIDDEN).chunk(6, dim=-1)
             shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = modulations
             normalized = self._modulate(block.norm1(packed), shift_attn, scale_attn, adaln_indices, segments)
             packed = self._gate(
