@@ -12,8 +12,6 @@ Two things the blocks leave to the caller: a keyframe reaches them EXIF-transpos
 frame count is aligned to `17 * n + 5` before the call, since that arithmetic lives on the denoising side of the cut.
 """
 
-import torch
-
 from diffusers.modular_pipelines.minimax_h3.before_encoder import MiniMaxH3Ref2VASetupStep
 from diffusers.modular_pipelines.minimax_h3.decoders import MiniMaxH3AfterDenoiseStep
 from diffusers.modular_pipelines.minimax_h3.encoders import (
@@ -31,50 +29,6 @@ from diffusers.modular_pipelines.minimax_h3.modular_blocks_minimax_h3 import (
 )
 from diffusers.modular_pipelines.modular_pipeline import SequentialPipelineBlocks
 from diffusers.modular_pipelines.modular_pipeline_utils import OutputParam
-
-
-class MiniMaxH3ParallelDecodeStep(MiniMaxH3DecodeStep):
-    """Decode independent video and audio latents concurrently without changing either decoder's precision."""
-
-    @torch.no_grad()
-    def __call__(self, components, state):
-        device = components._execution_device
-        if device.type != "cuda":
-            return super().__call__(components, state)
-
-        block_state = self.get_block_state(state)
-        current_stream = torch.cuda.current_stream(device)
-        video_stream = torch.cuda.Stream(device=device)
-        audio_stream = torch.cuda.Stream(device=device)
-        video_stream.wait_stream(current_stream)
-        audio_stream.wait_stream(current_stream)
-
-        with torch.cuda.stream(video_stream):
-            video_mean = torch.as_tensor(components.vae.config.latents_mean, device=device).view(1, -1, 1, 1, 1)
-            video_std = torch.as_tensor(components.vae.config.latents_std, device=device).view(1, -1, 1, 1, 1)
-            video_latents = block_state.latents * video_std + video_mean
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                decoded_video = components.vae.decode(video_latents, return_dict=False)[0]
-            pixel_mean = torch.as_tensor(components.pixel_mean, device=device).view(1, -1, 1, 1, 1)
-            pixel_std = torch.as_tensor(components.pixel_std, device=device).view(1, -1, 1, 1, 1)
-            decoded_video = (decoded_video.float() * pixel_std + pixel_mean).clamp(0, 1)
-
-        with torch.cuda.stream(audio_stream):
-            audio_mean = torch.as_tensor(components.audio_vae.config.latents_mean, device=device).view(1, -1, 1)
-            audio_std = torch.as_tensor(components.audio_vae.config.latents_std, device=device).view(1, -1, 1)
-            audio_latents = block_state.audio_latents * audio_std + audio_mean
-            decoded_audio = components.audio_vae.decode(audio_latents, return_dict=False)[0]
-            decoded_audio = decoded_audio.float().permute(1, 0, 2)
-
-        current_stream.wait_stream(video_stream)
-        current_stream.wait_stream(audio_stream)
-        block_state.videos = components.video_processor.postprocess_video(
-            decoded_video, output_type=block_state.output_type
-        )
-        block_state.audio = decoded_audio
-        block_state.sampling_rate = components.audio_sampling_rate
-        self.set_block_state(state, block_state)
-        return components, state
 
 
 def _wire_outputs(num_frames: bool = True) -> list[OutputParam]:
@@ -121,7 +75,7 @@ class MiniMaxH3GeneratorBlocks(SequentialPipelineBlocks):
         MiniMaxH3AutoKeyframeVaeEncoderStep,
         MiniMaxH3CoreDenoiseStep,
         MiniMaxH3AfterDenoiseStep,
-        MiniMaxH3ParallelDecodeStep,
+        MiniMaxH3DecodeStep,
     ]
     block_names = ["resize", "vae_encoder", "denoise", "after_denoise", "decode"]
 
@@ -176,7 +130,7 @@ class MiniMaxH3Ref2VAGeneratorBlocks(SequentialPipelineBlocks):
         MiniMaxH3Ref2VAReferenceEncoderStep,
         MiniMaxH3Ref2VACoreDenoiseStep,
         MiniMaxH3AfterDenoiseStep,
-        MiniMaxH3ParallelDecodeStep,
+        MiniMaxH3DecodeStep,
     ]
     block_names = ["setup", "reference_encoder", "denoise", "after_denoise", "decode"]
 
