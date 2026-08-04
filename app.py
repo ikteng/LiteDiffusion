@@ -268,7 +268,7 @@ def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, heig
 
 
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
-def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed):
+def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, acceleration):
     """The only thing on GPU time: local conditioning, packed denoising and the two decoders.
 
     Only generated outputs and two timing scalars come back—a `@spaces.GPU` return crosses a process boundary by
@@ -305,7 +305,8 @@ def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height,
     begin_request = getattr(PIPE.transformer, "begin_request", None)
     end_request = getattr(PIPE.transformer, "end_request", None)
     if begin_request is not None:
-        begin_request(int(steps))
+        begin_request(int(steps), acceleration)
+    cache_stats = None
     try:
         with torch.inference_mode():
             state = PIPE(
@@ -321,13 +322,14 @@ def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height,
             )
     finally:
         if end_request is not None:
-            end_request()
+            cache_stats = end_request()
     return (
         state.get("videos")[0],
         state.get("audio")[0].cpu(),
         state.get("sampling_rate"),
         condition_seconds,
         num_text_tokens,
+        cache_stats,
     )
 
 
@@ -346,7 +348,7 @@ def _generate_with_hardware_retry(*args):
         return _generate(*args)
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=16, seed=42, upsample=False, acceleration="Ultra Fast", progress=gr.Progress(track_tqdm=True)):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
@@ -397,7 +399,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         + f"denoising {steps} steps at {width}x{height}, {num_frames} frames ...",
     )
     started = time.time()
-    frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens = _generate_with_hardware_retry(
+    frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens, cache_stats = _generate_with_hardware_retry(
         prompt,
         prompt_embeds,
         text_token_tags,
@@ -408,8 +410,10 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         num_frames,
         steps,
         seed,
+        acceleration,
     )
     generate_seconds = time.time() - started
+    cache_stats = cache_stats or {"computed": int(steps), "forecasted": 0}
     if local_condition_seconds is not None:
         condition_seconds = local_condition_seconds
         num_text_tokens = local_num_text_tokens
@@ -421,7 +425,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     encode_video(frames, fps=FPS, output_path=path, audio=audio, audio_sample_rate=sampling_rate)
 
     report = (
-        f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} steps · "
+        f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} scheduler steps · "
+        f"{cache_stats['computed']} DiT evaluations + {cache_stats['forecasted']} forecasts ({acceleration}) · "
         f"conditioner {condition_seconds:.0f}s ({num_text_tokens} tokens"
         f"{', upsampled' if refined else ''}) · "
         f"denoise + decode {denoise_seconds:.0f}s ({denoise_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
@@ -507,7 +512,13 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
             with gr.Accordion("Advanced options", open=False):
                 canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
                 duration = gr.Slider(label="Duration (s)", minimum=MIN_UI_DURATION, maximum=MAX_UI_DURATION, step=1, value=5)
-                steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
+                acceleration = gr.Radio(
+                    label="Acceleration",
+                    choices=["Ultra Fast", "Balanced", "Exact"],
+                    value="Ultra Fast",
+                    info="Ultra Fast forecasts at most 3 steps in a row; Exact evaluates every step.",
+                )
+                steps = gr.Slider(label="Scheduler steps", minimum=8, maximum=40, step=1, value=16)
                 seed = gr.Number(label="Seed", value=42, precision=0)
 
         with gr.Column():
@@ -536,7 +547,7 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
 
     run.click(
         generate,
-        [prompt, image, last_image, canvas, duration, steps, seed, upsample],
+        [prompt, image, last_image, canvas, duration, steps, seed, upsample, acceleration],
         [video, report, upsampled, upsampled_panel],
         api_name="generate",
     )

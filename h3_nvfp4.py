@@ -37,12 +37,14 @@ LAYERS = 50
 REFINER_LAYERS = 2
 EPS = 1e-5
 
-# EasyCache is a denoiser-internal approximation: it reuses a recent residual when the latent trajectory is changing
-# slowly.  Zero disables it and restores the exact NVFP4 path.  The conservative default is below ComfyUI's 0.20.
+# EasyCache is the conservative profile.  The Ultra Fast profile uses a bounded linear residual forecast:
+# three exact warmup evaluations, at most three forecasts in a row, and two exact tail evaluations.  Unlike blind
+# output reuse, forecasting follows the local denoising trajectory while making the amount of saved work predictable.
 EASYCACHE_THRESHOLD = max(0.0, float(os.environ.get("H3_EASYCACHE_THRESHOLD", "0.10")))
 EASYCACHE_START = min(1.0, max(0.0, float(os.environ.get("H3_EASYCACHE_START", "0.15"))))
 EASYCACHE_END = min(1.0, max(EASYCACHE_START, float(os.environ.get("H3_EASYCACHE_END", "0.95"))))
 EASYCACHE_SUBSAMPLE = max(1, int(os.environ.get("H3_EASYCACHE_SUBSAMPLE", "8")))
+FORECAST_BLEND = min(1.0, max(0.0, float(os.environ.get("H3_FORECAST_BLEND", "0.65"))))
 
 
 class H3StepCache:
@@ -57,6 +59,9 @@ class H3StepCache:
         self.total_steps = 0
         self.step = 0
         self.skipped = 0
+        self.profile = "balanced"
+        self.consecutive_skips = 0
+        self.last_actual_step = None
         self.previous_input = None
         self.previous_output = None
         self.previous_output_norm = None
@@ -64,23 +69,59 @@ class H3StepCache:
         self.accumulated_change = None
         self.video_residual = None
         self.audio_residual = None
+        self.video_residual_slope = None
+        self.audio_residual_slope = None
         self.pending_input = None
         self.pending_input_change = None
         self.pending_track = False
 
-    def begin(self, total_steps: int | None) -> None:
+    def begin(self, total_steps: int | None, profile: str = "balanced") -> None:
         self.__init__()
         self.total_steps = max(0, int(total_steps or 0))
+        self.profile = str(profile or "balanced").lower()
 
     @property
     def enabled(self) -> bool:
-        return EASYCACHE_THRESHOLD > 0.0 and self.total_steps > 2
+        return self.profile != "exact" and self.total_steps > 2
+
+    def _forecast(self, video_input, audio_input):
+        distance = max(1, self.step - int(self.last_actual_step or 0))
+        video_residual = self.video_residual
+        audio_residual = self.audio_residual
+        if self.video_residual_slope is not None:
+            video_residual = video_residual + self.video_residual_slope * (distance * FORECAST_BLEND)
+            audio_residual = audio_residual + self.audio_residual_slope * (distance * FORECAST_BLEND)
+        self.skipped += 1
+        self.consecutive_skips += 1
+        self.step += 1
+        return video_input + video_residual, audio_input + audio_residual
 
     def try_reuse(self, video_input, audio_input, condition_rows: int):
         self.pending_input = None
         self.pending_input_change = None
         self.pending_track = False
         if not self.enabled:
+            return None
+
+        # Ultra Fast is deliberately bounded: no more than three forecasts can separate exact transformer calls, and
+        # the high-noise warmup plus low-noise tail remain exact.  At the default 16 steps this executes 7 full DiT
+        # evaluations instead of 16 while still sampling the original 16-step scheduler trajectory.
+        if self.profile.startswith("ultra"):
+            can_forecast = (
+                self.step >= 3
+                and self.step < self.total_steps - 2
+                and self.consecutive_skips < 3
+                and self.last_actual_step is not None
+                and self.video_residual is not None
+                and self.audio_residual is not None
+                and self.video_residual.shape == video_input.shape
+                and self.audio_residual.shape == audio_input.shape
+            )
+            if can_forecast:
+                return self._forecast(video_input, audio_input)
+            return None
+
+        if EASYCACHE_THRESHOLD <= 0.0:
             return None
 
         end_step = math.floor(self.total_steps * EASYCACHE_END)
@@ -104,6 +145,7 @@ class H3StepCache:
             and self.audio_residual is not None
             and self.video_residual.shape == video_input.shape
             and self.audio_residual.shape == audio_input.shape
+            and self.consecutive_skips < 1
         )
         if not can_reuse:
             return None
@@ -113,9 +155,7 @@ class H3StepCache:
         accumulated = estimated_change if self.accumulated_change is None else self.accumulated_change + estimated_change
         if bool((accumulated < EASYCACHE_THRESHOLD).item()):
             self.accumulated_change = accumulated
-            self.skipped += 1
-            self.step += 1
-            return video_input + self.video_residual, audio_input + self.audio_residual
+            return self._forecast(video_input, audio_input)
         return None
 
     def update(self, video_input, audio_input, video_output, audio_output, condition_rows: int) -> None:
@@ -127,15 +167,29 @@ class H3StepCache:
             self.previous_input = self.pending_input.clone()
             self.previous_output = sampled_output.clone()
             self.previous_output_norm = sampled_output.abs().mean()
-            self.video_residual = (video_output - video_input).detach()
-            self.audio_residual = (audio_output - audio_input).detach()
             self.accumulated_change = None
+        new_video_residual = (video_output - video_input).detach()
+        new_audio_residual = (audio_output - audio_input).detach()
+        if self.video_residual is not None and self.last_actual_step is not None:
+            gap = max(1, self.step - self.last_actual_step)
+            self.video_residual_slope = (new_video_residual - self.video_residual) / gap
+            self.audio_residual_slope = (new_audio_residual - self.audio_residual) / gap
+        self.video_residual = new_video_residual
+        self.audio_residual = new_audio_residual
+        self.last_actual_step = self.step
+        self.consecutive_skips = 0
         self.step += 1
         self.pending_input = None
         self.pending_input_change = None
         self.pending_track = False
 
-    def finish(self) -> None:
+    def finish(self) -> dict:
+        stats = {
+            "steps": self.step,
+            "computed": max(0, self.step - self.skipped),
+            "forecasted": self.skipped,
+            "profile": self.profile,
+        }
         if self.enabled and self.step:
             computed = max(1, self.step - self.skipped)
             print(
@@ -144,6 +198,7 @@ class H3StepCache:
                 flush=True,
             )
         self.begin(None)
+        return stats
 
 
 def _quant_config(handle, prefix: str) -> dict | None:
@@ -455,21 +510,22 @@ class H3NVFP4Transformer(nn.Module):
     def set_attention_backend(self, backend: str) -> None:
         self.attention_backend = backend
 
-    def begin_request(self, total_steps: int | None = None) -> None:
+    def begin_request(self, total_steps: int | None = None, profile: str = "balanced") -> None:
         self._text_cache = None
         self._rope_cache = None
         self._segment_cache = None
         self._condition_video_rows = None
         self._condition_video_embedding = None
-        self._step_cache.begin(total_steps)
+        self._step_cache.begin(total_steps, profile)
 
-    def end_request(self) -> None:
-        self._step_cache.finish()
+    def end_request(self) -> dict:
+        stats = self._step_cache.finish()
         self._text_cache = None
         self._rope_cache = None
         self._segment_cache = None
         self._condition_video_rows = None
         self._condition_video_embedding = None
+        return stats
 
     def _refine_text(self, text_states: torch.Tensor) -> torch.Tensor:
         key = (text_states.data_ptr(), tuple(text_states.shape), text_states.device)
@@ -666,5 +722,7 @@ def load_transformer() -> H3NVFP4Transformer:
 
 
 def status() -> str:
-    cache = f"adaptive step cache {EASYCACHE_THRESHOLD:g}" if EASYCACHE_THRESHOLD else "exact steps"
-    return f"NVFP4 · {cache} · pruned AdaLN curve · fused QKV/QK-norm/RoPE · `{NVFP4_REPO}`"
+    return (
+        f"NVFP4 · linear residual forecast {FORECAST_BLEND:g} / adaptive cache {EASYCACHE_THRESHOLD:g} · "
+        f"pruned AdaLN curve · fused QKV/QK-norm/RoPE · `{NVFP4_REPO}`"
+    )

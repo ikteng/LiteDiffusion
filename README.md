@@ -24,8 +24,9 @@ Blackwell-native ComfyUI optimization path:
 - Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`.
 - A local 15.7 GB Qwen3-VL NVFP4-AWQ conditioner replaces the normal cross-Space API call. It contains exactly the
   first 50 language layers H3 reads, with the unused 14-layer tail and vocabulary head removed.
-- A conservative EasyCache-style trajectory estimator skips complete 50-layer denoiser evaluations when successive
-  latent changes are predictable; it is request-local and is not prompt-to-video output caching.
+- The default 16-step Ultra Fast schedule linearly forecasts the joint video/audio denoiser residual between exact
+  anchors: 7 complete 50-layer DiT evaluations plus 9 cheap forecasts. State is request-local; this is not
+  prompt-to-video output caching. Balanced and Exact modes remain selectable in the UI.
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
 - Video and audio output heads run only on their own rows, not the full packed sequence.
 - Prompt refinement and the rotary table are cached for the request instead of recomputed at every denoising step.
@@ -99,23 +100,25 @@ Attention itself stays on diffusers' `_native_cudnn` backend, which is faster th
 ZeroGPU RTX PRO 6000 pool. The MLP uses one fused QKV-style gate/up matrix, in-place SiLU×up, and the NVFP4 down
 projection.
 
-Above that exact kernel path, adaptive step reuse tracks the relative change between sparsely sampled input and
-output video latents. During the middle 80% of the schedule, it reuses the most recent full video+audio model
-residual only while the accumulated estimated output change remains below `0.10`; otherwise it immediately runs the
-transformer and recalibrates. The Space log reports the actual skipped-step count and denoiser-work reduction for
-each request. Different prompts and seeds never share this state.
+Above that kernel path, Ultra Fast preserves the scheduler's 16-step trajectory but evaluates the full DiT only at
+7 anchor steps. Between anchors it extrapolates the joint video/audio residual from the last two exact evaluations.
+It keeps the first three and last two evaluations exact and never forecasts more than three consecutive steps.
+Balanced retains the conservative EasyCache-style latent-change estimator at `0.10`; Exact disables all step reuse.
+The result panel and Space log report actual DiT evaluations and forecasts for every request. Different prompts and
+seeds never share this state.
 
 The old BF16/AoTI engine remains available with `H3_ENGINE=bf16`. It is useful as a quality/debug reference, but it is
 not the default.
 
 ## Quality trade-off
 
-The transformer, local conditioner, and adaptive step reuse are approximate. The checkpoint author reports that
+The transformer, local conditioner, and accelerated step modes are approximate. The checkpoint author reports that
 4-bit weights can show more
 mid-motion artifacts and weaker shape retention than the larger INT8 ConvRot checkpoint on difficult 15-second
 clips. The comparison was not fully controlled, so treat it as a real caution rather than a quantified quality
-score. Adaptive reuse adds another speed/quality trade-off; lower `H3_EASYCACHE_THRESHOLD` for motion-sensitive
-clips, or set it to `0` for all 28 transformer evaluations.
+score. Use Balanced for difficult fast motion, eyes, fingers, or shape retention, and Exact when every requested
+transformer evaluation matters. Increasing the step slider does not change Ultra Fast's maximum three-step forecast
+span; it adds more exact anchor evaluations as well as scheduler steps.
 
 The Space keeps both VAEs full precision and leaves AdaLN, norms, embeddings and output heads out of NVFP4. For the
 exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquantized transformer and its AoTI option.
@@ -135,10 +138,11 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | Prompt-upsampling and local-load fallback service. |
 | `H3_PLACEMENT` | `lazy` (`nvfp4`) | Move the compact transformer and VAEs on the first GPU call, then keep them resident. |
 | `H3_ATTENTION` | `_native_cudnn` | Attention backend for both the main stack and text refiner. |
-| `H3_EASYCACHE_THRESHOLD` | `0.10` | Maximum accumulated estimated change before a full denoiser evaluation; `0` disables reuse. |
+| `H3_EASYCACHE_THRESHOLD` | `0.10` | Balanced-mode maximum accumulated estimated change before a full denoiser evaluation. |
 | `H3_EASYCACHE_START` | `0.15` | Fraction of the schedule before which every step is evaluated. |
 | `H3_EASYCACHE_END` | `0.95` | Fraction of the schedule after which every step is evaluated. |
 | `H3_EASYCACHE_SUBSAMPLE` | `8` | Generated-video row stride used by the inexpensive change estimator. |
+| `H3_FORECAST_BLEND` | `0.65` | Ultra Fast linear-trend strength; lower values stay closer to last-residual reuse. |
 | `H3_GPU_SIZE` | `xlarge` | 95 GiB Blackwell ZeroGPU allocation. |
 | `H3_AOTI` | `0` | BF16 engine only: load the optional repeated-block AoTI package. |
 
