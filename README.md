@@ -28,7 +28,7 @@ Blackwell-native ComfyUI optimization path:
   high-signal change probe before deciding whether blocks 2–50 can reuse their previous joint residual. An optional
   Ultra Fast mode forecasts between exact anchors, while Exact evaluates every requested step. This is not
   prompt-to-video output caching.
-- NVIDIA Sol-Attn's native SM120 kernel sparsifies target-video attention after a dense warmup while retaining text,
+- NVIDIA Sol-Attn's released Triton kernel sparsifies target-video attention after a dense warmup while retaining text,
   conditioning-video and generated-audio rows as an exact KV sink with dense prefix queries.
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
 - Each block converts its complete AdaLN table in one launch instead of six, and the final RMSNorm runs only on
@@ -103,7 +103,7 @@ does not install or launch the ComfyUI application. The small adapter uses only 
 1. Dynamic NVFP4 activation quantization and native FP4 matrix multiplication.
 2. Fused in-place Q/K RMSNorm and three-axis split-half rotary embedding.
 
-Attention uses NVIDIA Sol-Attn's SM120 CuTe kernel on eligible target-video calls and keeps diffusers'
+Attention uses NVIDIA Sol-Attn's portable Triton kernel on eligible target-video calls and keeps diffusers'
 `_native_cudnn` backend for the first ten denoising steps, the first two blocks, Exact mode, short sequences and any
 safe fallback. The MLP uses one fused QKV-style gate/up matrix, in-place SiLU×up, and the NVFP4 down projection.
 
@@ -156,6 +156,7 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_FORECAST_BLEND` | `0.65` | Ultra Fast linear-trend strength; lower values stay closer to last-residual reuse. |
 | `H3_FUSED_ADALN` | `0` | Opt in to fused AdaLN kernels; compilation is expensive on fresh ZeroGPU workers. |
 | `H3_SOL_ATTN` | `1` | Use NVIDIA Sol-Attn outside Exact mode, with automatic dense fallback. |
+| `H3_SOL_ATTN_BACKEND` | `triton` | Released portable backend; `auto` tries CuTe when its rapidly moving DSL/FFI ABI matches. |
 | `H3_SOL_ATTN_TAU` | `1.0` | Official H3 sparse-routing threshold. |
 | `H3_SOL_ATTN_DENSE_STEPS` | `10` | Initial denoising steps kept on exact dense attention. |
 | `H3_SOL_ATTN_DENSE_LAYERS` | `2` | Initial transformer blocks kept on exact dense attention. |

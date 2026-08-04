@@ -60,6 +60,7 @@ FIRST_BLOCK_DENSE_END = max(1, int(os.environ.get("H3_FIRST_BLOCK_DENSE_END", "2
 FORECAST_BLEND = min(1.0, max(0.0, float(os.environ.get("H3_FORECAST_BLEND", "0.65"))))
 FUSED_ADALN = os.environ.get("H3_FUSED_ADALN", "0") == "1" and triton is not None
 SOL_ATTN = os.environ.get("H3_SOL_ATTN", "1") == "1"
+SOL_ATTN_BACKEND = os.environ.get("H3_SOL_ATTN_BACKEND", "triton").lower()
 SOL_ATTN_TAU = float(os.environ.get("H3_SOL_ATTN_TAU", "1.0"))
 SOL_ATTN_DENSE_STEPS = max(0, int(os.environ.get("H3_SOL_ATTN_DENSE_STEPS", "10")))
 SOL_ATTN_DENSE_LAYERS = max(0, int(os.environ.get("H3_SOL_ATTN_DENSE_LAYERS", "2")))
@@ -360,19 +361,21 @@ class H3SolAttention:
             self.dense_calls += 1
             return None
         try:
-            from sol_attn import sol_attn
+            if SOL_ATTN_BACKEND == "triton":
+                from sol_attn.triton_ref import sol_attn
+            else:
+                from sol_attn import sol_attn
 
             q, k, v = (tensor.contiguous() for tensor in (query, key, value))
-            attended = sol_attn(
-                q,
-                k,
-                v,
-                tau=SOL_ATTN_TAU,
-                thresh_type="diag",
-                kv_splits=1,
-                sink_start=0,
-                sink_tokens=self.video_start,
-            )
+            kwargs = {
+                "tau": SOL_ATTN_TAU,
+                "thresh_type": "diag",
+                "sink_start": 0,
+                "sink_tokens": self.video_start,
+            }
+            if SOL_ATTN_BACKEND != "triton":
+                kwargs["kv_splits"] = 1
+            attended = sol_attn(q, k, v, **kwargs)
             # An exact KV sink does not make the prefix's own queries dense. H3 jointly generates audio in that
             # prefix, so reproduce those rows with exact attention as NVIDIA's H3 integration does.
             prefix = self.video_start

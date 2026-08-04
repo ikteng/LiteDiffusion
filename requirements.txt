@@ -19,15 +19,9 @@ spaces==0.51.1
 # Blackwell-native NVFP4 GEMMs and the fused Q/K RMSNorm + split-half RoPE kernel used by h3_nvfp4.py.
 # CUDA 13 is mandatory: older builds emulate this path and are slower than BF16.
 comfy-kitchen==0.2.26
-# NVIDIA Sol-Engine's released sparse-attention package, pinned to the H3 release. The native SM120 path uses
-# CuTe DSL; the package retains its portable Triton fallback if that optional backend cannot initialize.
+# NVIDIA Sol-Engine's released sparse-attention package, pinned to the H3 release. The Space selects its portable
+# Triton backend because the separately released CuTe DSL/TVM-FFI packages currently have an incompatible ABI.
 sol-attn @ git+https://github.com/NVlabs/Sana.git@46031940ba8af5d18054217e571149579424c0b1#subdirectory=techniques/sparse_backends
-# Sol-Engine's Aug-03 H3 kernel targets the 4.5 `cute.math.fmax` signature; 4.6 changed that API.
-nvidia-cutlass-dsl==4.5.3
-cuda-python>=13.0
-# Sol-Attn compiles its CuTe callable with `--enable-tvm-ffi`, but its package currently leaves this transitive
-# runtime undeclared. Without it the SM120 path compiles up to dispatch and then falls back to dense attention.
-apache-tvm-ffi>=0.1.12
 # No `kernels` pin on purpose: the Hub attention backends want `kernels>=0.12.3`, and that version breaks
 # transformers 5.8.0 at import.
 # PyAV muxes the generated soundtrack onto the frames (`encode_video`).
