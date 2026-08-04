@@ -24,9 +24,9 @@ Blackwell-native ComfyUI optimization path:
 - Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`.
 - A local 15.7 GB Qwen3-VL NVFP4-AWQ conditioner replaces the normal cross-Space API call. It contains exactly the
   first 50 language layers H3 reads, with the unused 14-layer tail and vocabulary head removed.
-- The default 16-step Ultra Fast schedule linearly forecasts the joint video/audio denoiser residual between exact
-  anchors: 7 complete 50-layer DiT evaluations plus 9 cheap forecasts. State is request-local; this is not
-  prompt-to-video output caching. Balanced and Exact modes remain selectable in the UI.
+- The default 28-step Balanced schedule uses conservative, request-local adaptive residual reuse. An optional Ultra
+  Fast mode forecasts between exact anchors, while Exact evaluates every requested step. This is not prompt-to-video
+  output caching.
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
 - Video and audio output heads run only on their own rows, not the full packed sequence.
 - Prompt refinement and the rotary table are cached for the request instead of recomputed at every denoising step.

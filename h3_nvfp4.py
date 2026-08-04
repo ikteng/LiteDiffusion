@@ -145,7 +145,6 @@ class H3StepCache:
             and self.audio_residual is not None
             and self.video_residual.shape == video_input.shape
             and self.audio_residual.shape == audio_input.shape
-            and self.consecutive_skips < 1
         )
         if not can_reuse:
             return None
@@ -155,7 +154,9 @@ class H3StepCache:
         accumulated = estimated_change if self.accumulated_change is None else self.accumulated_change + estimated_change
         if bool((accumulated < EASYCACHE_THRESHOLD).item()):
             self.accumulated_change = accumulated
-            return self._forecast(video_input, audio_input)
+            self.skipped += 1
+            self.step += 1
+            return video_input + self.video_residual, audio_input + self.audio_residual
         return None
 
     def update(self, video_input, audio_input, video_output, audio_output, condition_rows: int) -> None:

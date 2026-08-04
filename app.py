@@ -348,7 +348,7 @@ def _generate_with_hardware_retry(*args):
         return _generate(*args)
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=16, seed=42, upsample=False, acceleration="Ultra Fast", progress=gr.Progress(track_tqdm=True)):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, acceleration="Balanced", progress=gr.Progress(track_tqdm=True)):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
@@ -484,8 +484,8 @@ INTRO = """# MiniMax-H3 Ultra Fast
 </div>
 
 **MiniMax-H3 Ultra Fast** runs a local truncated Qwen3-VL conditioner and the pruned Blackwell-native NVFP4
-transformer with fused QKV, fused Q/K norm + RoPE, full-precision video/audio decoders, and synchronized sound. Its
-default 16-step trajectory uses only **7 exact DiT evaluations** plus **9 bounded linear residual forecasts**.
+transformer with fused QKV, fused Q/K norm + RoPE, full-precision video/audio decoders, and synchronized sound. The
+default **28-step Balanced** mode uses conservative adaptive reuse; the aggressive forecast mode is optional.
 It is optimized from the original [`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3)
 Space.
 """
@@ -516,10 +516,10 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
                 acceleration = gr.Radio(
                     label="Acceleration",
                     choices=["Ultra Fast", "Balanced", "Exact"],
-                    value="Ultra Fast",
+                    value="Balanced",
                     info="Ultra Fast forecasts at most 3 steps in a row; Exact evaluates every step.",
                 )
-                steps = gr.Slider(label="Scheduler steps", minimum=8, maximum=40, step=1, value=16)
+                steps = gr.Slider(label="Scheduler steps", minimum=8, maximum=40, step=1, value=28)
                 seed = gr.Number(label="Seed", value=42, precision=0)
 
         with gr.Column():
