@@ -54,8 +54,16 @@ EASYCACHE_THRESHOLD = max(0.0, float(os.environ.get("H3_EASYCACHE_THRESHOLD", "0
 EASYCACHE_START = min(1.0, max(0.0, float(os.environ.get("H3_EASYCACHE_START", "0.15"))))
 EASYCACHE_END = min(1.0, max(EASYCACHE_START, float(os.environ.get("H3_EASYCACHE_END", "0.95"))))
 EASYCACHE_SUBSAMPLE = max(1, int(os.environ.get("H3_EASYCACHE_SUBSAMPLE", "8")))
+FIRST_BLOCK_THRESHOLD = max(0.0, float(os.environ.get("H3_FIRST_BLOCK_THRESHOLD", "0.08")))
+FIRST_BLOCK_DENSE_START = max(1, int(os.environ.get("H3_FIRST_BLOCK_DENSE_START", "3")))
+FIRST_BLOCK_DENSE_END = max(1, int(os.environ.get("H3_FIRST_BLOCK_DENSE_END", "2")))
 FORECAST_BLEND = min(1.0, max(0.0, float(os.environ.get("H3_FORECAST_BLEND", "0.65"))))
 FUSED_ADALN = os.environ.get("H3_FUSED_ADALN", "0") == "1" and triton is not None
+SOL_ATTN = os.environ.get("H3_SOL_ATTN", "1") == "1"
+SOL_ATTN_TAU = float(os.environ.get("H3_SOL_ATTN_TAU", "1.0"))
+SOL_ATTN_DENSE_STEPS = max(0, int(os.environ.get("H3_SOL_ATTN_DENSE_STEPS", "10")))
+SOL_ATTN_DENSE_LAYERS = max(0, int(os.environ.get("H3_SOL_ATTN_DENSE_LAYERS", "2")))
+SOL_ATTN_MIN_TOKENS = max(0, int(os.environ.get("H3_SOL_ATTN_MIN_TOKENS", "8192")))
 
 
 if triton is not None:
@@ -117,6 +125,9 @@ class H3StepCache:
         self.pending_input = None
         self.pending_input_change = None
         self.pending_track = False
+        self.head_residual = None
+        self.tail_residual = None
+        self.first_block_output = None
 
     def begin(self, total_steps: int | None, profile: str = "balanced") -> None:
         self.__init__()
@@ -144,6 +155,11 @@ class H3StepCache:
         self.pending_input_change = None
         self.pending_track = False
         if not self.enabled:
+            return None
+
+        # Balanced uses NVIDIA's H3 FirstBlockCache below, after block 0 has produced a high-signal residual.
+        # Only the deliberately aggressive Ultra profile forecasts a whole transformer call before block 0.
+        if not self.profile.startswith("ultra"):
             return None
 
         # Ultra Fast is deliberately bounded: no more than three forecasts can separate exact transformer calls, and
@@ -202,7 +218,58 @@ class H3StepCache:
             return video_input + self.video_residual, audio_input + self.audio_residual
         return None
 
+    def first_block_decision(self, block_input: torch.Tensor, block_output: torch.Tensor) -> bool:
+        """Return True when blocks 1..49 can reuse their previous joint residual.
+
+        This is the single-GPU equivalent of NVIDIA Sol-Engine's H3 FirstBlockCache at threshold 0.08. The first
+        block is always evaluated. Its normalized residual change is a much stronger predictor than raw latent
+        motion, while the cached tail residual still covers the complete text/video/audio packed sequence.
+        """
+        if not self.enabled or self.profile.startswith("ultra"):
+            return False
+        if FIRST_BLOCK_THRESHOLD <= 0.0:
+            self.first_block_output = block_output.detach().clone()
+            return False
+
+        keep_dense = self.step < FIRST_BLOCK_DENSE_START or self.step >= self.total_steps - FIRST_BLOCK_DENSE_END
+        residual = block_output - block_input
+        reusable = (
+            not keep_dense
+            and self.head_residual is not None
+            and self.tail_residual is not None
+            and self.tail_residual.shape == block_output.shape
+        )
+        should_reuse = False
+        if reusable:
+            difference = (residual - self.head_residual).abs().mean()
+            reference = self.head_residual.abs().mean().clamp_min(1e-8)
+            should_reuse = bool(((difference / reference) <= FIRST_BLOCK_THRESHOLD).item())
+
+        if should_reuse:
+            self.skipped += 1
+            self.consecutive_skips += 1
+            self.step += 1
+            return True
+
+        # This engine's residual/gate operations update `packed` in place. Preserve the head output before later
+        # blocks mutate the same storage; diffusers' reference blocks are out-of-place and do not need this clone.
+        self.first_block_output = block_output.detach().clone()
+        self.head_residual = residual.detach()
+        return False
+
+    def update_first_block_tail(self, final_block_output: torch.Tensor) -> None:
+        if self.first_block_output is None:
+            return
+        self.tail_residual = (final_block_output - self.first_block_output).detach()
+        self.last_actual_step = self.step
+        self.consecutive_skips = 0
+        self.step += 1
+        self.first_block_output = None
+
     def update(self, video_input, audio_input, video_output, audio_output, condition_rows: int) -> None:
+        # Balanced's clock and state are updated at the block-stack boundary by FirstBlockCache.
+        if self.enabled and not self.profile.startswith("ultra"):
+            return
         if self.pending_track:
             sampled_output = video_output[0, condition_rows::EASYCACHE_SUBSAMPLE].detach().float()
             if self.previous_output is not None and self.pending_input_change is not None:
@@ -247,6 +314,83 @@ class H3StepCache:
             )
         self.begin(None)
         return stats
+
+
+class H3SolAttention:
+    """NVIDIA Sol-Attn policy adapted to H3's single-GPU packed attention.
+
+    The packed prefix (text, conditioning video and generated audio) remains an exact KV sink and its query rows are
+    recomputed densely. Only target-video query/key interactions become sparse, after ten dense denoising steps and
+    outside the first two transformer blocks. Any unavailable/JIT-failing backend falls back to cuDNN for the request.
+    """
+
+    def __init__(self):
+        self.enabled = SOL_ATTN
+        self.step = 0
+        self.video_start = 0
+        self.sparse_calls = 0
+        self.dense_calls = 0
+        self.failure = None
+
+    def begin(self):
+        self.step = 0
+        self.video_start = 0
+        self.sparse_calls = 0
+        self.dense_calls = 0
+        self.failure = None
+
+    def observe(self, video_indices: torch.Tensor, sequence: int, step: int) -> None:
+        self.step = int(step)
+        if not self.video_start:
+            deltas = video_indices[1:] - video_indices[:-1]
+            breaks = (deltas != 1).nonzero().flatten()
+            start = int(breaks[-1]) + 1 if len(breaks) else 0
+            self.video_start = int(video_indices[start]) if video_indices.numel() else sequence
+
+    def __call__(self, query, key, value, layer: int):
+        tokens = int(query.shape[1])
+        if (
+            not self.enabled
+            or self.failure is not None
+            or self.step < SOL_ATTN_DENSE_STEPS
+            or layer < SOL_ATTN_DENSE_LAYERS
+            or tokens < SOL_ATTN_MIN_TOKENS
+            or not 0 < self.video_start < tokens
+        ):
+            self.dense_calls += 1
+            return None
+        try:
+            from sol_attn import sol_attn
+
+            q, k, v = (tensor.contiguous() for tensor in (query, key, value))
+            attended = sol_attn(
+                q,
+                k,
+                v,
+                tau=SOL_ATTN_TAU,
+                thresh_type="diag",
+                kv_splits=1,
+                sink_start=0,
+                sink_tokens=self.video_start,
+            )
+            # An exact KV sink does not make the prefix's own queries dense. H3 jointly generates audio in that
+            # prefix, so reproduce those rows with exact attention as NVIDIA's H3 integration does.
+            prefix = self.video_start
+            dense_prefix = F.scaled_dot_product_attention(
+                q[:, :prefix].transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                dropout_p=0.0,
+                is_causal=False,
+            ).transpose(1, 2)
+            attended[:, :prefix] = dense_prefix
+            self.sparse_calls += 1
+            return attended
+        except Exception as error:
+            self.failure = f"{type(error).__name__}: {error}"
+            print(f"[h3-sol-attn] falling back to dense attention: {self.failure}", flush=True)
+            self.dense_calls += 1
+            return None
 
 
 def _quant_config(handle, prefix: str) -> dict | None:
@@ -378,7 +522,7 @@ class H3Attention(nn.Module):
         self.k_norm.load(handle, f"{prefix}.k_norm")
         self.out_proj.load(handle, f"{prefix}.out_proj")
 
-    def forward(self, hidden_states, rope_table, backend: str):
+    def forward(self, hidden_states, rope_table, backend: str, sparse=None, layer: int = -1):
         sequence = hidden_states.shape[0]
         qkv = self.qkv_proj(hidden_states)
         query, key, value = qkv.split(HEADS * HEAD_DIM, dim=-1)
@@ -396,15 +540,17 @@ class H3Attention(nn.Module):
             epsilon=self.q_norm.eps,
             rot_dim=rope_table.shape[-3] * 2,
         )
-        attended = dispatch_attention_fn(
-            query,
-            key,
-            value,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=False,
-            backend=backend,
-        )
+        attended = sparse(query, key, value, layer) if sparse is not None else None
+        if attended is None:
+            attended = dispatch_attention_fn(
+                query,
+                key,
+                value,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=False,
+                backend=backend,
+            )
         return self.out_proj(attended.reshape(sequence, HEADS * HEAD_DIM))
 
 
@@ -525,6 +671,7 @@ class H3NVFP4Transformer(nn.Module):
         self._output_indices = None
         self._generated_rows = None
         self._step_cache = H3StepCache()
+        self._sol_attention = H3SolAttention()
 
     @property
     def dtype(self) -> torch.dtype:
@@ -566,9 +713,13 @@ class H3NVFP4Transformer(nn.Module):
         self._output_indices = None
         self._generated_rows = None
         self._step_cache.begin(total_steps, profile)
+        self._sol_attention.begin()
 
     def end_request(self) -> dict:
         stats = self._step_cache.finish()
+        stats["sol_sparse_calls"] = self._sol_attention.sparse_calls
+        stats["sol_dense_calls"] = self._sol_attention.dense_calls
+        stats["sol_failure"] = self._sol_attention.failure
         self._text_cache = None
         self._rope_cache = None
         self._segment_cache = None
@@ -719,21 +870,42 @@ class H3NVFP4Transformer(nn.Module):
         adaln_indices = timestep_indices * 3 + token_tags.clamp(min=0)
         segments = self._segments(adaln_indices)
         rope = self._rope(position_ids, packed.dtype)
+        use_sol_attention = self._step_cache.profile != "exact" and self._sol_attention.enabled
+        self._sol_attention.observe(video_indices, packed.shape[0], self._step_cache.step)
 
-        for block in self.blocks:
+        reused_tail = False
+        for layer, block in enumerate(self.blocks):
+            if layer == 0:
+                # Block 0 writes its residual updates in place, so retain the pre-block value for the official FBC
+                # signal `(head_output - head_input)`.
+                block_input = packed.detach().clone()
             # One conversion per small modulation table, rather than one conversion per sequence segment.
             modulations = block.adaln_proj(time_embedding, packed.dtype)
             shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = modulations
             normalized = self._modulate(block.norm1(packed), shift_attn, scale_attn, adaln_indices, segments)
             packed = self._gate(
                 packed,
-                block.attn(normalized, rope, self.attention_backend),
+                block.attn(
+                    normalized,
+                    rope,
+                    self.attention_backend,
+                    self._sol_attention if use_sol_attention else None,
+                    layer,
+                ),
                 gate_attn,
                 adaln_indices,
                 segments,
             )
             normalized = self._modulate(block.norm2(packed), shift_mlp, scale_mlp, adaln_indices, segments)
             packed = self._gate(packed, block.mlp(normalized), gate_mlp, adaln_indices, segments)
+
+            if layer == 0:
+                if self._step_cache.first_block_decision(block_input, packed):
+                    packed = packed + self._step_cache.tail_residual
+                    reused_tail = True
+                    break
+            if layer == len(self.blocks) - 1 and not reused_tail:
+                self._step_cache.update_first_block_tail(packed)
 
         shift, scale = self.final_layer.adaln_proj(time_embedding)
 

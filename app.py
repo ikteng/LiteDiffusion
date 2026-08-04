@@ -429,7 +429,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
 
     report = (
         f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} scheduler steps · "
-        f"{cache_stats['computed']} DiT evaluations + {cache_stats['forecasted']} forecasts ({acceleration}) · "
+        f"{cache_stats['computed']} full DiT evaluations + {cache_stats['forecasted']} cached block-stack reuses "
+        f"({acceleration}) · Sol-Attn {cache_stats.get('sol_sparse_calls', 0)} sparse calls · "
         f"conditioner {condition_seconds:.0f}s ({num_text_tokens} tokens"
         f"{', upsampled' if refined else ''}) · "
         f"denoise + decode {denoise_seconds:.0f}s ({denoise_seconds / int(steps):.1f} s/step) · seed {int(seed)}"

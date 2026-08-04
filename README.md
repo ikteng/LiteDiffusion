@@ -24,9 +24,12 @@ Blackwell-native ComfyUI optimization path:
 - Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`.
 - A local 15.7 GB Qwen3-VL NVFP4-AWQ conditioner replaces the normal cross-Space API call. It contains exactly the
   first 50 language layers H3 reads, with the unused 14-layer tail and vocabulary head removed.
-- The default 28-step Balanced schedule uses conservative, request-local adaptive residual reuse. An optional Ultra
-  Fast mode forecasts between exact anchors, while Exact evaluates every requested step. This is not prompt-to-video
-  output caching.
+- The default 28-step Balanced schedule uses NVIDIA Sol-Engine's H3 FirstBlockCache: block 1 is evaluated as a
+  high-signal change probe before deciding whether blocks 2–50 can reuse their previous joint residual. An optional
+  Ultra Fast mode forecasts between exact anchors, while Exact evaluates every requested step. This is not
+  prompt-to-video output caching.
+- NVIDIA Sol-Attn's native SM120 kernel sparsifies target-video attention after a dense warmup while retaining text,
+  conditioning-video and generated-audio rows as an exact KV sink with dense prefix queries.
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
 - Each block converts its complete AdaLN table in one launch instead of six, and the final RMSNorm runs only on
   generated video/audio rows whose outputs are retained.
@@ -100,14 +103,15 @@ does not install or launch the ComfyUI application. The small adapter uses only 
 1. Dynamic NVFP4 activation quantization and native FP4 matrix multiplication.
 2. Fused in-place Q/K RMSNorm and three-axis split-half rotary embedding.
 
-Attention itself stays on diffusers' `_native_cudnn` backend, which is faster than the default SDPA path on the
-ZeroGPU RTX PRO 6000 pool. The MLP uses one fused QKV-style gate/up matrix, in-place SiLU×up, and the NVFP4 down
-projection.
+Attention uses NVIDIA Sol-Attn's SM120 CuTe kernel on eligible target-video calls and keeps diffusers'
+`_native_cudnn` backend for the first ten denoising steps, the first two blocks, Exact mode, short sequences and any
+safe fallback. The MLP uses one fused QKV-style gate/up matrix, in-place SiLU×up, and the NVFP4 down projection.
 
 Above that kernel path, Ultra Fast preserves the scheduler's 16-step trajectory but evaluates the full DiT only at
 7 anchor steps. Between anchors it extrapolates the joint video/audio residual from the last two exact evaluations.
 It keeps the first three and last two evaluations exact and never forecasts more than three consecutive steps.
-Balanced retains the conservative EasyCache-style latent-change estimator at `0.10`; Exact disables all step reuse.
+Balanced uses the official H3 FirstBlockCache signal at `0.08`, with three dense warmup and two dense tail steps;
+Exact disables all block reuse and sparse attention.
 The result panel and Space log report actual DiT evaluations and forecasts for every request. Different prompts and
 seeds never share this state.
 
@@ -146,8 +150,16 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_EASYCACHE_START` | `0.15` | Fraction of the schedule before which every step is evaluated. |
 | `H3_EASYCACHE_END` | `0.95` | Fraction of the schedule after which every step is evaluated. |
 | `H3_EASYCACHE_SUBSAMPLE` | `8` | Generated-video row stride used by the inexpensive change estimator. |
+| `H3_FIRST_BLOCK_THRESHOLD` | `0.08` | Balanced-mode normalized first-block residual threshold, matching NVIDIA's H3 preset. |
+| `H3_FIRST_BLOCK_DENSE_START` | `3` | Dense warmup steps retained before FirstBlockCache may reuse blocks 2–50. |
+| `H3_FIRST_BLOCK_DENSE_END` | `2` | Dense tail steps retained after FirstBlockCache reuse is disabled. |
 | `H3_FORECAST_BLEND` | `0.65` | Ultra Fast linear-trend strength; lower values stay closer to last-residual reuse. |
 | `H3_FUSED_ADALN` | `0` | Opt in to fused AdaLN kernels; compilation is expensive on fresh ZeroGPU workers. |
+| `H3_SOL_ATTN` | `1` | Use NVIDIA Sol-Attn outside Exact mode, with automatic dense fallback. |
+| `H3_SOL_ATTN_TAU` | `1.0` | Official H3 sparse-routing threshold. |
+| `H3_SOL_ATTN_DENSE_STEPS` | `10` | Initial denoising steps kept on exact dense attention. |
+| `H3_SOL_ATTN_DENSE_LAYERS` | `2` | Initial transformer blocks kept on exact dense attention. |
+| `H3_SOL_ATTN_MIN_TOKENS` | `8192` | Skip sparse-kernel overhead on shorter packed sequences. |
 | `H3_GPU_SIZE` | `xlarge` | 95 GiB Blackwell ZeroGPU allocation. |
 | `H3_AOTI` | `0` | BF16 engine only: load the optional repeated-block AoTI package. |
 
@@ -168,7 +180,7 @@ This is an optimized derivative of the original
 
 The fused/pruned model structure follows
 [`comfy/ldm/minimax/model.py`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/ldm/minimax/model.py) from
-ComfyUI (Apache-2.0), and the adaptive residual estimator follows ComfyUI's built-in
-[`EasyCache`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_easycache.py) design. The quantized checkpoint and its conversion notes are from
+ComfyUI (Apache-2.0). FirstBlockCache and Sol-Attn are adapted from NVIDIA's Apache-2.0
+[`MiniMax-H3 Sol-Engine`](https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3) release. The quantized checkpoint and its conversion notes are from
 [`lilcheaty/MiniMax-H3-NVFP4`](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4). MiniMax-H3 weights remain governed
 by the MiniMax-H3 Community License Agreement.
