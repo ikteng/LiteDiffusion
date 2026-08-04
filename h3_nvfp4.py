@@ -20,6 +20,9 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import comfy_kitchen as kitchen
+from comfy_kitchen.tensor import QuantizedTensor, TensorCoreNVFP4Layout
+from diffusers.models.attention_dispatch import dispatch_attention_fn
 
 try:
     import triton
@@ -283,8 +286,6 @@ class H3Linear(nn.Module):
                 weight if self.compute_dtype is None else weight.to(self.compute_dtype), requires_grad=False
             )
         elif config.get("format") == "nvfp4":
-            from comfy_kitchen.tensor import QuantizedTensor, TensorCoreNVFP4Layout
-
             block_scale = handle.get_tensor(f"{prefix}.weight_scale")
             if block_scale.dtype == torch.uint8:
                 block_scale = block_scale.view(torch.float8_e4m3fn)
@@ -332,8 +333,6 @@ class H3Linear(nn.Module):
             weight = self.weight.dequantize().to(hidden_states.dtype)
             return F.linear(hidden_states, weight, None if self.bias is None else self.bias.to(hidden_states.dtype))
 
-        from comfy_kitchen.tensor import QuantizedTensor
-
         shape = hidden_states.shape
         flat = hidden_states.reshape(-1, shape[-1])
         scale = None if self.input_scale is None else self.input_scale.to(flat.device)
@@ -360,7 +359,7 @@ class H3RMSNorm(nn.Module):
         return F.rms_norm(
             hidden_states,
             (self.width,),
-            self.weight.to(device=hidden_states.device, dtype=hidden_states.dtype),
+            self.weight,
             self.eps,
         )
 
@@ -380,9 +379,6 @@ class H3Attention(nn.Module):
         self.out_proj.load(handle, f"{prefix}.out_proj")
 
     def forward(self, hidden_states, rope_table, backend: str):
-        import comfy_kitchen as kitchen
-        from diffusers.models.attention_dispatch import dispatch_attention_fn
-
         sequence = hidden_states.shape[0]
         qkv = self.qkv_proj(hidden_states)
         query, key, value = qkv.split(HEADS * HEAD_DIM, dim=-1)
@@ -395,8 +391,8 @@ class H3Attention(nn.Module):
             query,
             key,
             rope_table,
-            self.q_norm.weight.to(query.device),
-            self.k_norm.weight.to(key.device),
+            self.q_norm.weight,
+            self.k_norm.weight,
             epsilon=self.q_norm.eps,
             rot_dim=rope_table.shape[-3] * 2,
         )
@@ -596,8 +592,6 @@ class H3NVFP4Transformer(nn.Module):
             query = block.attn.q_norm(query.view(1, -1, HEADS, HEAD_DIM))
             key_states = block.attn.k_norm(key_states.view(1, -1, HEADS, HEAD_DIM))
             value = value.view(1, -1, HEADS, HEAD_DIM)
-            from diffusers.models.attention_dispatch import dispatch_attention_fn
-
             attended = dispatch_attention_fn(
                 query,
                 key_states,
