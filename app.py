@@ -483,15 +483,36 @@ INTRO = """# MiniMax-H3 Ultra Fast
 <div align="center">
   <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ model ]</strong></a> &nbsp;
   <a href="https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4" target="_blank" rel="noopener"><strong>[ NVFP4 ]</strong></a> &nbsp;
+  <a href="https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3" target="_blank" rel="noopener"><strong>[ Sol-Engine ]</strong></a> &nbsp;
   <a href="https://www.minimax.io/blog/minimax-h3" target="_blank" rel="noopener"><strong>[ blog ]</strong></a> &nbsp;
   <a href="https://huggingface.co/spaces/multimodalart/minimax-h3" target="_blank" rel="noopener"><strong>[ original Space ]</strong></a>
 </div>
 
-**MiniMax-H3 Ultra Fast** runs a local truncated Qwen3-VL conditioner and the pruned Blackwell-native NVFP4
-transformer with fused QKV, fused Q/K norm + RoPE, full-precision video/audio decoders, and synchronized sound. The
-default **28-step Balanced** mode uses conservative adaptive reuse; the aggressive forecast mode is optional.
-It is optimized from the original [`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3)
-Space.
+**MiniMax-H3 Ultra Fast** generates video and synchronized sound locally on one Blackwell ZeroGPU worker. The default
+**28-step Balanced** mode keeps the scheduler quality setting while reducing repeated transformer work.
+
+| Active optimization | What it does |
+|---|---|
+| Pruned NVFP4 | 12.5 GB / 20.1B effective transformer instead of 61.7 GiB / 33.1B BF16; native CUDA 13 FP4 GEMMs. |
+| Local conditioner | Truncated 50-layer Qwen3-VL NVFP4-AWQ; removes the normal remote encode and second GPU queue. |
+| GPU residency | Transformer, conditioner and both full-precision VAEs stay resident; no layerwise CPU offload. |
+| Fused blocks | Fused QKV, Q/K RMSNorm + partial RoPE, fused gate/up MLP layout, and in-place SiLU/gating. |
+| Pruned AdaLN | Replaces 13.04B projection parameters with a 1,025-point curve; one conversion per block. |
+| FirstBlockCache | Balanced evaluates block 1 as a change probe, then safely reuses blocks 2–50 at threshold `0.08`. |
+| Sol-Attn | Long target-video sequences use NVIDIA's sparse Triton kernel; prefix/audio rows remain exact. |
+| Quality guards | First 10 steps, first 2 blocks, 3 warmup steps and 2 tail steps stay dense where applicable. |
+| Less output work | Final norm and heads process only retained generated video/audio rows. |
+| Request-local caches | Text refinement, RoPE, segment metadata and static keyframe projections run once per request. |
+| Less memory traffic | No redundant packed-buffer zero-fill, CPU-cached segment row IDs, hoisted hot dispatch lookups. |
+| Reliability | Retries transient ZeroGPU ECC/CUDA worker failures automatically. |
+
+**Modes:** Balanced uses FirstBlockCache and long-sequence Sol-Attn; Ultra Fast adds bounded residual forecasting;
+Exact disables reuse and sparse attention but retains the lossless kernel/layout optimizations. No prompt-to-video
+result cache is used. A warm 960×544, 56-frame test measured **35s Exact → 23s Balanced (~1.52×)**.
+
+Optimized from the original
+[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space. H/t to **blanchon** for
+pointing me to NVIDIA Sana/Sol-Engine.
 
 If you find this Space helpful, please give it a like <3
 """
@@ -499,6 +520,18 @@ If you find this Space helpful, please give it a like <3
 CSS = """
 .main.fillable {max-width: 1250px !important}
 .dark .gradio-container { color: var(--body-text-color); }
+"""
+
+TECHNICAL_NOTES = """### How the speedups compose
+
+NVFP4 and AdaLN pruning make the entire inference stack fit on one worker, eliminating remote conditioning and
+per-layer transfers. Fused layouts reduce launches and activation traffic inside every exact block evaluation.
+FirstBlockCache then removes redundant block-stack evaluations without lowering the requested 28 scheduler steps,
+while Sol-Attn is enabled only above 24,576 packed tokens where quadratic attention can repay its routing overhead.
+
+The deployed path is benchmark-driven: concurrent VAE decoding, combined AdaLN banks, PyTorch 2.13 and always-on
+Triton AdaLN kernels were tested but reverted because they were slower, unsupported on ZeroGPU, or too costly at cold
+start. Video and audio VAEs, normalization, embeddings and output heads remain at higher precision.
 """
 
 with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
@@ -523,7 +556,7 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
                     label="Acceleration",
                     choices=["Ultra Fast", "Balanced", "Exact"],
                     value="Balanced",
-                    info="Ultra Fast forecasts at most 3 steps in a row; Exact evaluates every step.",
+                    info="Balanced: FirstBlockCache + long-sequence Sol-Attn. Ultra Fast: bounded forecasts. Exact: dense.",
                 )
                 steps = gr.Slider(label="Scheduler steps", minimum=8, maximum=40, step=1, value=28)
                 seed = gr.Number(label="Seed", value=42, precision=0)
@@ -558,6 +591,8 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
         [video, report, upsampled, upsampled_panel],
         api_name="generate",
     )
+
+    gr.Markdown(TECHNICAL_NOTES)
 
     gr.Markdown(
         '<div style="text-align:center"><a href="https://x.com/realmrfakename" target="_blank" '
