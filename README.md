@@ -1,13 +1,135 @@
 ---
-title: Zero Wave2 2
-emoji: 📈
+title: MiniMax H3 Ultra
+emoji: ⚡
 colorFrom: purple
-colorTo: blue
+colorTo: indigo
 sdk: gradio
-sdk_version: 6.19.0
-python_version: '3.13'
+sdk_version: 6.20.0
 app_file: app.py
-pinned: false
+pinned: true
+short_description: Blackwell-native NVFP4 video + synchronized audio generation
+suggested_hardware: zero-a10g
 ---
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+# MiniMax-H3 Ultra — pruned NVFP4 on Blackwell
+
+Joint video and synchronized sound from MiniMax-H3, with the repeatedly executed transformer rebuilt around the
+Blackwell-native ComfyUI optimization path:
+
+- 12.5 GB pruned NVFP4 transformer instead of the 61.7 GiB BF16 inference transformer.
+- 20.1B effective inference parameters instead of 33.1B; the redundant 13.04B AdaLN projection weights become a
+  compact sampled timestep curve.
+- One fused QKV projection per attention layer.
+- One fused in-place Q/K RMSNorm + partial split-half RoPE kernel.
+- Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`.
+- Segment-wise in-place AdaLN modulation and gated residual accumulation.
+- Video and audio output heads run only on their own rows, not the full packed sequence.
+- Prompt refinement and the rotary table are cached for the request instead of recomputed at every denoising step.
+- The video VAE and audio VAE remain full precision.
+
+The source model is [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3). The pruned NVFP4
+checkpoint is
+[`lilcheaty/MiniMax-H3-NVFP4`](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4), derived from ComfyUI's
+[`MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) repackage.
+
+## Why the pruned transformer matters
+
+MiniMax-H3's published model card notes that about 13B parameters live in AdaLN-related branches and that their
+outputs can be precomputed for inference. The pruned checkpoint makes that concrete: it samples the shared timestep
+embedding curve at 1025 points and linearly interpolates an 8-value coordinate for each requested timestep. Every
+block's modulation projection consequently becomes `[96768, 8]` instead of `[96768, 2688]`.
+
+| parameter group | original BF16 architecture | pruned architecture |
+|---|---:|---:|
+| AdaLN projections | 13.04B | 0.04B |
+| MLP | 12.02B | 11.56B |
+| attention | 8.02B | 7.71B |
+| refiner, norms and embeddings | 0.05B | 0.80B |
+| **total** | **33.12B** | **20.11B** |
+
+The four large matrices in each of the 50 blocks—fused QKV, attention output, MLP up/gate and MLP down—are NVFP4.
+The modulation curve, norms, embeddings, biases and final heads stay at higher precision.
+
+## Why this is faster than the old 4-bit Space
+
+Quantization alone does not guarantee speed. The older 4-bit comparison paid for CPU offload traffic on every layer
+because its runtime did not keep the transformer resident. This engine is about 12 GB, so the transformer, both VAEs,
+working activations and decoder workspace fit together on the 95 GiB `xlarge` ZeroGPU worker. There is no layerwise
+host-device weight traffic in the denoising loop.
+
+ComfyUI reports about a 2× NVFP4 uplift over FP8/BF16 on Blackwell in supported workloads. The H3 checkpoint author
+measured 1.90 s/iteration for pruned NVFP4 versus 2.17 s/iteration for pruned INT8 ConvRot on an RTX PRO 6000
+Blackwell at 864×480, 39 frames. Those numbers are useful implementation evidence, not a promise for every canvas:
+H3 attention grows quadratically with packed sequence length, so resolution, duration and keyframe vision tokens
+still dominate large requests.
+
+## Split deployment
+
+The full checkpoint cannot fit under a single Space's 150 GB storage ceiling. This Space remains the denoising half:
+
+| component | where it runs | precision / format |
+|---|---|---|
+| Qwen3-VL layer-50 conditioner | [`qwen3vl-conditioner`](https://huggingface.co/spaces/multimodalart/qwen3vl-conditioner) | BF16 |
+| H3 transformer | this Space | pruned NVFP4 + higher-precision islands |
+| video VAE | this Space | full precision checkpoint policy |
+| audio VAE | this Space | FP32 |
+
+The wire format is `prompt_embeds` plus `text_token_tags` in a safetensors file. The conditioner also returns the
+resolved canvas, aligned frame count and prompt plan. Keyframes are encoded again by this Space's video VAE so the
+conditioning latents exactly match the pixels seen by the conditioner.
+
+## Kernel path
+
+`h3_nvfp4.py` adapts the public ComfyUI H3 implementation to diffusers' packed transformer signature. It deliberately
+does not install or launch the ComfyUI application. The small adapter uses only `comfy-kitchen` for:
+
+1. Dynamic NVFP4 activation quantization and native FP4 matrix multiplication.
+2. Fused in-place Q/K RMSNorm and three-axis split-half rotary embedding.
+
+Attention itself stays on diffusers' `_native_cudnn` backend, which is faster than the default SDPA path on the
+ZeroGPU RTX PRO 6000 pool. The MLP uses one fused QKV-style gate/up matrix, in-place SiLU×up, and the NVFP4 down
+projection.
+
+The old BF16/AoTI engine remains available with `H3_ENGINE=bf16`. It is useful as a quality/debug reference, but it is
+not the default.
+
+## Quality trade-off
+
+NVFP4 is approximate. The checkpoint author reports that 4-bit weights can show more mid-motion artifacts and weaker
+shape retention than the larger INT8 ConvRot checkpoint on difficult 15-second clips. The comparison was not fully
+controlled, so treat it as a real caution rather than a quantified quality score.
+
+The Space keeps both VAEs full precision and leaves AdaLN, norms, embeddings and output heads out of NVFP4. For the
+exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquantized transformer and its AoTI option.
+
+## Space variables
+
+| variable | default | meaning |
+|---|---|---|
+| `H3_ENGINE` | `nvfp4` | `nvfp4` ultra engine or `bf16` reference engine. |
+| `H3_NVFP4_REPO` | `lilcheaty/MiniMax-H3-NVFP4` | Repository containing the pruned Comfy-format transformer. |
+| `H3_NVFP4_FILE` | `minimax_h3_fl2va_pruned_nvfp4.safetensors` | FL2VA/T2VA transformer file. |
+| `H3_MODEL_REPO` | `MiniMaxAI/MiniMax-H3` | Canonical schedulers and VAE checkpoint. |
+| `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | Remote layer-50 conditioner Space. |
+| `H3_PLACEMENT` | `lazy` (`nvfp4`) | Move the compact transformer and VAEs on the first GPU call, then keep them resident. |
+| `H3_ATTENTION` | `_native_cudnn` | Attention backend for both the main stack and text refiner. |
+| `H3_GPU_SIZE` | `xlarge` | 95 GiB Blackwell ZeroGPU allocation. |
+| `H3_AOTI` | `0` | BF16 engine only: load the optional repeated-block AoTI package. |
+
+## Runtime requirements
+
+- PyTorch 2.11 with CUDA 13.0.
+- A Blackwell GPU (`sm120` for this Space). NVFP4 on older architectures is emulated and can be slower than BF16.
+- `comfy-kitchen==0.2.26` for the native layouts and fused Q/K kernel.
+- The pinned MiniMax-H3 diffusers pull request for the modular schedulers, packing and VAE decode path.
+
+No secret is required. All model artifacts are public, and `gradio_client` forwards the requesting user's ZeroGPU
+identity to the conditioner.
+
+## Attribution
+
+The fused/pruned model structure follows
+[`comfy/ldm/minimax/model.py`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/ldm/minimax/model.py) from
+ComfyUI (Apache-2.0). The quantized checkpoint and its conversion notes are from
+[`lilcheaty/MiniMax-H3-NVFP4`](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4). MiniMax-H3 weights remain governed
+by the MiniMax-H3 Community License Agreement.

@@ -1,0 +1,29 @@
+# `diffusers` is installed from the canonical MiniMax-H3 pull request,
+# https://github.com/huggingface/diffusers/pull/14371 ("Minimax h3 follow up (review & refactor)"), pinned to a
+# **commit** rather than to its `minimax-h3-refactor` branch: the PR is a WIP and its head moves, and this Space's
+# blocks subclass its block classes. Re-pin — and re-check `h3_split_blocks.py` against the block names of the new
+# head — whenever the PR updates.
+#
+#   665f578278365ea4a3318cb8c9b66ce6c01204b9 = refs/pull/14371/head at the time of this deploy
+--extra-index-url https://download.pytorch.org/whl/cu130
+diffusers @ git+https://github.com/huggingface/diffusers.git@665f578278365ea4a3318cb8c9b66ce6c01204b9
+torch==2.11.0
+torchvision==0.26.0
+# The Qwen3-VL processor decides the vision patch count, so a different minor changes the conditioning.
+transformers==5.8.0
+accelerate==1.14.0
+# diffusers pins <2.
+huggingface-hub==1.24.0
+gradio==6.20.0
+spaces==0.51.1
+# Blackwell-native NVFP4 GEMMs and the fused Q/K RMSNorm + split-half RoPE kernel used by h3_nvfp4.py.
+# CUDA 13 is mandatory: older builds emulate this path and are slower than BF16.
+comfy-kitchen==0.2.26
+# No `kernels` pin on purpose: the Hub attention backends want `kernels>=0.12.3`, and that version breaks
+# transformers 5.8.0 at import.
+# PyAV muxes the generated soundtrack onto the frames (`encode_video`).
+av
+pillow
+numpy
+requests
+safetensors>=0.8.0
