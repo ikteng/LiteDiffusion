@@ -491,7 +491,18 @@ INTRO = """# MiniMax-H3 Ultra Fast
 **MiniMax-H3 Ultra Fast** generates video and synchronized sound locally on one Blackwell ZeroGPU worker. The default
 **28-step Balanced** mode keeps the scheduler quality setting while reducing repeated transformer work.
 
-| Active optimization | What it does |
+**Modes:** Balanced uses FirstBlockCache and long-sequence Sol-Attn; Ultra Fast adds bounded residual forecasting;
+Exact disables reuse and sparse attention but retains the lossless kernel/layout optimizations. No prompt-to-video
+result cache is used. A warm 960×544, 56-frame test measured **35s Exact → 23s Balanced (~1.52×)**.
+
+Optimized from the original
+[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space. H/t to **blanchon** for
+pointing me to NVIDIA Sana/Sol-Engine.
+
+If you find this Space helpful, please give it a like <3
+"""
+
+OPTIMIZATIONS = """| Active optimization | What it does |
 |---|---|
 | Pruned NVFP4 | 12.5 GB / 20.1B effective transformer instead of 61.7 GiB / 33.1B BF16; native CUDA 13 FP4 GEMMs. |
 | Local conditioner | Truncated 50-layer Qwen3-VL NVFP4-AWQ; removes the normal remote encode and second GPU queue. |
@@ -505,16 +516,6 @@ INTRO = """# MiniMax-H3 Ultra Fast
 | Request-local caches | Text refinement, RoPE, segment metadata and static keyframe projections run once per request. |
 | Less memory traffic | No redundant packed-buffer zero-fill, CPU-cached segment row IDs, hoisted hot dispatch lookups. |
 | Reliability | Retries transient ZeroGPU ECC/CUDA worker failures automatically. |
-
-**Modes:** Balanced uses FirstBlockCache and long-sequence Sol-Attn; Ultra Fast adds bounded residual forecasting;
-Exact disables reuse and sparse attention but retains the lossless kernel/layout optimizations. No prompt-to-video
-result cache is used. A warm 960×544, 56-frame test measured **35s Exact → 23s Balanced (~1.52×)**.
-
-Optimized from the original
-[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space. H/t to **blanchon** for
-pointing me to NVIDIA Sana/Sol-Engine.
-
-If you find this Space helpful, please give it a like <3
 """
 
 CSS = """
@@ -536,6 +537,8 @@ start. Video and audio VAEs, normalization, embeddings and output heads remain a
 
 with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
     gr.Markdown(INTRO)
+    with gr.Accordion("Optimization details", open=False):
+        gr.Markdown(OPTIMIZATIONS)
 
     with gr.Row():
         with gr.Column():
