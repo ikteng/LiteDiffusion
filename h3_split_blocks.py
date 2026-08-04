@@ -1,8 +1,8 @@
-"""The halves of a **split** MiniMax-H3 deployment, for both of its checkpoint partitions.
+"""Composable conditioner and generator halves of MiniMax-H3, for both checkpoint partitions.
 
-MiniMax-H3 is 195.9 GiB in bfloat16 and a ZeroGPU Space is evicted at 150 GB of storage, so `MiniMaxH3Blocks` is cut
-at its `text_encoder` step: the 62.14 GiB Qwen3-VL runs in the conditioner Space, everything else in a generator
-Space, and `prompt_embeds` + `text_token_tags` is the whole wire format between them.
+The blocks cut `MiniMaxH3Blocks` at its `text_encoder` step. They can run in separate Spaces with `prompt_embeds` and
+`text_token_tags` as a wire format, or sequentially in one GPU worker when a compact local conditioner fits beside
+the generator.
 
 `resize` / `setup` run on **both** sides: they own no pretrained component, and each half needs the canvas and the
 prepared keyframes or normalized references. Both conditioner halves also return the resolved `height` / `width` /
@@ -84,7 +84,7 @@ class MiniMaxH3GeneratorBlocks(SequentialPipelineBlocks):
         return (
             "The denoising half of a split MiniMax-H3 deployment: the `t2va` / `fl2va` branch of `MiniMaxH3Blocks` "
             "without its text-encoder step, so `prompt_embeds` and `text_token_tags` come in as inputs and the "
-            "62.14 GiB Qwen3-VL conditioner is never loaded here."
+            "conditioner is supplied by the caller or by the preceding local conditioner half."
         )
 
     @property
@@ -139,7 +139,7 @@ class MiniMaxH3Ref2VAGeneratorBlocks(SequentialPipelineBlocks):
         return (
             "The denoising half of a split MiniMax-H3 `ref2va` deployment: the `ref2va` branch of `MiniMaxH3Blocks` "
             "without its text-encoder step, so `prompt_embeds` and `text_token_tags` come in as inputs and the "
-            "62.14 GiB Qwen3-VL conditioner is never loaded here. The transformer is the `transformer_ref` partition."
+            "conditioner is supplied by the caller or preceding local half. The transformer is the `transformer_ref` partition."
         )
 
     @property

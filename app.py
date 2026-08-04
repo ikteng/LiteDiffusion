@@ -1,4 +1,4 @@
-"""MiniMax-H3 `t2va` / `fl2va`, split deployment — the denoising half."""
+"""MiniMax-H3 Ultra Fast: local layer-50 conditioning plus `t2va` / `fl2va` generation."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import gradio as gr
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "MiniMaxAI/MiniMax-H3")
 CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
+CONDITIONER_MODE = os.environ.get("H3_CONDITIONER_MODE", "local").lower()
 # `nvfp4` is the Blackwell-native ultra path; `bf16` preserves the original 33B diffusers transformer as a fallback.
 ENGINE = os.environ.get("H3_ENGINE", "nvfp4").lower()
 # `pack` places the transformer at startup, `lazy` moves everything on the first GPU call, `offload` hands placement to
@@ -73,6 +74,8 @@ def lower_duration_floor(seconds: float = MIN_UI_DURATION) -> None:
 
 PIPE = None
 MANAGER = None
+COND_PIPE = None
+COND_ERROR: str | None = None
 LOAD_ERROR: str | None = None
 LOADED_IN: float | None = None
 
@@ -82,7 +85,7 @@ def status() -> str:
         return LOAD_ERROR
     if PIPE is None:
         payload = (
-            "pruned NVFP4 transformer + full-precision VAEs (~28 GB)"
+            "pruned NVFP4 transformer + local NVFP4 conditioner + full-precision VAEs (~44 GB)"
             if ENGINE == "nvfp4"
             else "BF16 transformer + VAEs (77.3 GB)"
         )
@@ -95,21 +98,27 @@ def status() -> str:
         import h3_aoti
 
         engine_status = f"BF16, unquantized · {h3_aoti.status()}"
+    if COND_PIPE is not None:
+        import h3_local_conditioner
+
+        conditioner_status = h3_local_conditioner.status()
+    else:
+        conditioner_status = f"remote `{CONDITIONER_SPACE}`" + (" (local fallback)" if COND_ERROR else "")
     return (
         f"Ready · **{engine_status}** · VAEs full precision · placement `{PLACEMENT}` · attention `{ATTENTION}` · "
-        f"loaded in {LOADED_IN:.0f}s · conditioner `{CONDITIONER_SPACE}`"
+        f"loaded in {LOADED_IN:.0f}s · conditioner {conditioner_status}"
     )
 
 
 def load_models() -> str | None:
-    """Load the denoising half at startup.
+    """Load the compact generator and, by default, its local truncated conditioner at startup.
 
     `MiniMaxH3GeneratorBlocks` declares `transformer`, `vae`, `audio_vae`, the two schedulers and `video_processor`,
     so `load_components` fetches exactly those subfolders — `text_encoder/` and `transformer_ref/` are never touched.
     Both autoencoders carry `_keep_in_fp32_modules` over every module and stay float32: a bfloat16 audio VAE decodes
     the soundtrack roughly 20 dB too quiet.
     """
-    global PIPE, MANAGER, LOAD_ERROR, LOADED_IN
+    global PIPE, MANAGER, COND_PIPE, COND_ERROR, LOAD_ERROR, LOADED_IN
 
     if PIPE is not None or LOAD_ERROR is not None:
         return LOAD_ERROR
@@ -159,7 +168,28 @@ def load_models() -> str | None:
             manager.enable_auto_cpu_offload(device="cuda")
             _arm_decode_hooks(pipe)
 
-        PIPE, MANAGER = pipe, manager
+        cond_pipe = None
+        if CONDITIONER_MODE == "local":
+            try:
+                from h3_local_conditioner import load_local_conditioner
+                from h3_split_blocks import MiniMaxH3ConditionerBlocks
+
+                print("[cond] loading the local truncated NVFP4-AWQ conditioner ...", flush=True)
+                text_encoder, tokenizer, processor = load_local_conditioner()
+                cond_pipe = MiniMaxH3ConditionerBlocks().init_pipeline(MODEL_REPO)
+                cond_pipe.update_components(
+                    text_encoder=text_encoder,
+                    tokenizer=tokenizer,
+                    processor=processor,
+                )
+            except Exception as error:
+                traceback.print_exc()
+                COND_ERROR = f"{type(error).__name__}: {error}"
+                print(f"[cond] local load failed ({COND_ERROR}); retaining the remote fallback", flush=True)
+        elif CONDITIONER_MODE != "remote":
+            raise ValueError(f"H3_CONDITIONER_MODE must be `local` or `remote`, got {CONDITIONER_MODE!r}")
+
+        PIPE, MANAGER, COND_PIPE = pipe, manager, cond_pipe
         LOADED_IN = time.time() - started
         print(f"[gen] ready in {LOADED_IN:.0f}s", flush=True)
     except Exception as error:
@@ -225,30 +255,51 @@ _DECODE_BASE, _DECODE_PER_DEFAULT_CANVAS, _DEFAULT_CANVAS_PIXELS = 15, 15, 960 *
 _PLACEMENT_ALLOWANCE, _PAD = 12, 10
 
 
-def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
+def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
     height, width, num_frames, steps = int(height), int(width), int(num_frames), int(steps)
     latent_frames = (num_frames - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK * LATENTS_PER_CHUNK + 2
     patches = (height // 32) * (width // 32)
     rows = latent_frames * patches + (int(image is not None) + int(last_image is not None)) * patches
     denoise = steps * (_DUR_B * rows + _DUR_C * rows**2)
     decode = _DECODE_BASE + _DECODE_PER_DEFAULT_CANVAS * (height * width * num_frames) / _DEFAULT_CANVAS_PIXELS
-    return max(60, int(denoise + decode) + _PLACEMENT_ALLOWANCE + _PAD)
+    local_conditioning = 20 if prompt_embeds is None else 0
+    return max(60, int(denoise + decode) + local_conditioning + _PLACEMENT_ALLOWANCE + _PAD)
 
 
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
-def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed):
-    """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
+def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed):
+    """The only thing on GPU time: local conditioning, packed denoising and the two decoders.
 
-    Only the three generated outputs come back — a `@spaces.GPU` return crosses a process boundary by pickling, and
-    the full `PipelineState` still holds the packed latents, the rotary grid and the row indices on the card.
+    Only generated outputs and two timing scalars come back—a `@spaces.GPU` return crosses a process boundary by
+    pickling, and the full `PipelineState` still holds packed latents, the rotary grid and row indices on the card.
     """
     import torch
 
+    if COND_PIPE is not None and prompt_embeds is None:
+        COND_PIPE.text_encoder.to("cuda")
     if PLACEMENT == "lazy":
         PIPE.to("cuda")
     elif PLACEMENT == "pack":
         PIPE.vae.to("cuda")
         PIPE.audio_vae.to("cuda")
+
+    condition_seconds = None
+    num_text_tokens = None
+    if prompt_embeds is None:
+        if COND_PIPE is None:
+            raise RuntimeError(f"The local conditioner is unavailable: {COND_ERROR or 'disabled'}")
+        conditioned = time.time()
+        condition_state = COND_PIPE(
+            prompt=prompt,
+            image=image,
+            last_image=last_image,
+            height=int(height),
+            width=int(width),
+        )
+        prompt_embeds = condition_state.get("prompt_embeds")
+        text_token_tags = condition_state.get("text_token_tags")
+        condition_seconds = time.time() - conditioned
+        num_text_tokens = int(prompt_embeds.shape[1])
 
     begin_request = getattr(PIPE.transformer, "begin_request", None)
     end_request = getattr(PIPE.transformer, "end_request", None)
@@ -270,7 +321,13 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     finally:
         if end_request is not None:
             end_request()
-    return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
+    return (
+        state.get("videos")[0],
+        state.get("audio")[0].cpu(),
+        state.get("sampling_rate"),
+        condition_seconds,
+        num_text_tokens,
+    )
 
 
 def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
@@ -287,28 +344,49 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     from diffusers.utils import encode_video
 
     num_frames = snap_frames(duration)
-
-    progress(0.0, desc=f"Upsampling the prompt on {CONDITIONER_SPACE} ..." if upsample else f"Conditioning on {CONDITIONER_SPACE} ...")
-    conditioned = time.time()
-    prompt_embeds, text_token_tags, metadata, plan = encode_remote(
-        prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample
-    )
-    condition_seconds = time.time() - conditioned
-    height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
-    refined = plan.get("refined_prompt") or ""
+    height, width = CANVASES[canvas]
 
     def keyframe(path):
-        # The conditioning latents encoded here have to be of the image the conditioner looked at, which it prepares
-        # exactly this way.
+        # Both local conditioner and denoiser receive the same upright RGB source; their resize blocks then apply the
+        # same target canvas independently.
         return ImageOps.exif_transpose(Image.open(path)).convert("RGB") if path else None
 
-    progress(0.1, desc=f"Denoising {steps} steps at {width}x{height}, {num_frames} frames ...")
+    first_frame, final_frame = keyframe(image_path), keyframe(last_image_path)
+    prompt_embeds = text_token_tags = None
+    condition_seconds = None
+    num_text_tokens = None
+    refined = ""
+
+    # Prompt rewriting needs the discarded LM head and decoder tail, so it intentionally retains the remote path.
+    # Normal generation—the default—keeps embeddings on this worker and never serializes them through another API.
+    if upsample or COND_PIPE is None:
+        progress(
+            0.0,
+            desc=f"Upsampling and conditioning on {CONDITIONER_SPACE} ..."
+            if upsample
+            else f"Local conditioner unavailable; using {CONDITIONER_SPACE} ...",
+        )
+        conditioned = time.time()
+        prompt_embeds, text_token_tags, metadata, plan = encode_remote(
+            prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample
+        )
+        condition_seconds = time.time() - conditioned
+        height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
+        num_text_tokens = int(plan["num_text_tokens"])
+        refined = plan.get("refined_prompt") or ""
+
+    progress(
+        0.1,
+        desc=("Local conditioning + " if prompt_embeds is None else "")
+        + f"denoising {steps} steps at {width}x{height}, {num_frames} frames ...",
+    )
     started = time.time()
-    frames, audio, sampling_rate = _generate(
+    frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens = _generate(
+        prompt,
         prompt_embeds,
         text_token_tags,
-        keyframe(image_path),
-        keyframe(last_image_path),
+        first_frame,
+        final_frame,
         height,
         width,
         num_frames,
@@ -316,6 +394,10 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         seed,
     )
     generate_seconds = time.time() - started
+    if local_condition_seconds is not None:
+        condition_seconds = local_condition_seconds
+        num_text_tokens = local_num_text_tokens
+    denoise_seconds = generate_seconds - (local_condition_seconds or 0.0)
 
     directory = os.path.join(tempfile.gettempdir(), "h3-outputs")
     os.makedirs(directory, exist_ok=True)
@@ -324,9 +406,9 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
 
     report = (
         f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} steps · "
-        f"conditioner {condition_seconds:.0f}s ({plan['num_text_tokens']} tokens"
+        f"conditioner {condition_seconds:.0f}s ({num_text_tokens} tokens"
         f"{', upsampled' if refined else ''}) · "
-        f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
+        f"denoise + decode {denoise_seconds:.0f}s ({denoise_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
     return path, report, refined, gr.update(visible=bool(refined))
@@ -371,17 +453,19 @@ def _fit_keyframe(image_path, current_canvas):
 
 load_models()
 
-INTRO = """# MiniMax-H3 Ultra
+INTRO = """# MiniMax-H3 Ultra Fast
 
 <div align="center">
   <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ model ]</strong></a> &nbsp;
   <a href="https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4" target="_blank" rel="noopener"><strong>[ NVFP4 ]</strong></a> &nbsp;
   <a href="https://www.minimax.io/blog/minimax-h3" target="_blank" rel="noopener"><strong>[ blog ]</strong></a> &nbsp;
-  <a href="https://huggingface.co/spaces/multimodalart/minimax-h3-reference" target="_blank" rel="noopener"><strong>[ reference to video ]</strong></a>
+  <a href="https://huggingface.co/spaces/multimodalart/minimax-h3" target="_blank" rel="noopener"><strong>[ original Space ]</strong></a>
 </div>
 
-**MiniMax-H3 Ultra** runs the pruned Blackwell-native NVFP4 transformer with fused QKV, fused Q/K norm + RoPE,
-full-precision video/audio decoders, and the original synchronized soundtrack generation.
+**MiniMax-H3 Ultra Fast** runs a local truncated Qwen3-VL conditioner and the pruned Blackwell-native NVFP4
+transformer with fused QKV, fused Q/K norm + RoPE, full-precision video/audio decoders, and synchronized sound.
+It is optimized from the original [`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3)
+Space.
 """
 
 CSS = """
@@ -389,7 +473,7 @@ CSS = """
 .dark .gradio-container { color: var(--body-text-color); }
 """
 
-with gr.Blocks(title="MiniMax-H3") as demo:
+with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
     gr.Markdown(INTRO)
 
     with gr.Row():

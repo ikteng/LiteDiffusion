@@ -1,5 +1,5 @@
 ---
-title: MiniMax H3 Ultra
+title: MiniMax-H3 Ultra Fast
 emoji: ⚡
 colorFrom: purple
 colorTo: indigo
@@ -7,11 +7,11 @@ sdk: gradio
 sdk_version: 6.20.0
 app_file: app.py
 pinned: true
-short_description: Blackwell-native NVFP4 video + synchronized audio generation
+short_description: Ultra-fast local NVFP4 video + synchronized audio generation
 suggested_hardware: zero-a10g
 ---
 
-# MiniMax-H3 Ultra — pruned NVFP4 on Blackwell
+# MiniMax-H3 Ultra Fast — local conditioner + pruned NVFP4 on Blackwell
 
 Joint video and synchronized sound from MiniMax-H3, with the repeatedly executed transformer rebuilt around the
 Blackwell-native ComfyUI optimization path:
@@ -22,6 +22,8 @@ Blackwell-native ComfyUI optimization path:
 - One fused QKV projection per attention layer.
 - One fused in-place Q/K RMSNorm + partial split-half RoPE kernel.
 - Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`.
+- A local 15.7 GB Qwen3-VL NVFP4-AWQ conditioner replaces the normal cross-Space API call. It contains exactly the
+  first 50 language layers H3 reads, with the unused 14-layer tail and vocabulary head removed.
 - A conservative EasyCache-style trajectory estimator skips complete 50-layer denoiser evaluations when successive
   latent changes are predictable; it is request-local and is not prompt-to-video output caching.
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
@@ -67,20 +69,23 @@ Blackwell at 864×480, 39 frames. Those numbers are useful implementation eviden
 H3 attention grows quadratically with packed sequence length, so resolution, duration and keyframe vision tokens
 still dominate large requests.
 
-## Split deployment
+## One-Space deployment
 
-The full checkpoint cannot fit under a single Space's 150 GB storage ceiling. This Space remains the denoising half:
+The original BF16 deployment had to be split because its 62.14 GiB conditioner plus 61.7 GiB transformer could not
+fit comfortably under one Space's storage and runtime limits. The pruned formats change that calculation:
 
 | component | where it runs | precision / format |
 |---|---|---|
-| Qwen3-VL layer-50 conditioner | [`qwen3vl-conditioner`](https://huggingface.co/spaces/multimodalart/qwen3vl-conditioner) | BF16 |
+| Qwen3-VL layer-50 conditioner | this Space | truncated NVFP4-AWQ weights / BF16 GEMMs + BF16 vision tower |
 | H3 transformer | this Space | pruned NVFP4 + higher-precision islands |
 | video VAE | this Space | full precision checkpoint policy |
 | audio VAE | this Space | FP32 |
 
-The wire format is `prompt_embeds` plus `text_token_tags` in a safetensors file. The conditioner also returns the
-resolved canvas, aligned frame count and prompt plan. Keyframes are encoded again by this Space's video VAE so the
-conditioning latents exactly match the pixels seen by the conditioner.
+The embeddings stay on the same GPU worker and flow directly into H3: there is no Gradio round trip, second queue,
+safetensors serialization, or user-quota handoff during normal generation. Prompt upsampling still uses the remote
+BF16 conditioner because rewriting requires the language-model head and the 14 decoder layers deliberately removed
+from the local inference-only checkpoint. The remote service also remains an automatic fallback if local loading
+fails.
 
 ## Kernel path
 
@@ -105,7 +110,8 @@ not the default.
 
 ## Quality trade-off
 
-NVFP4 and adaptive step reuse are approximate. The checkpoint author reports that 4-bit weights can show more
+The transformer, local conditioner, and adaptive step reuse are approximate. The checkpoint author reports that
+4-bit weights can show more
 mid-motion artifacts and weaker shape retention than the larger INT8 ConvRot checkpoint on difficult 15-second
 clips. The comparison was not fully controlled, so treat it as a real caution rather than a quantified quality
 score. Adaptive reuse adds another speed/quality trade-off; lower `H3_EASYCACHE_THRESHOLD` for motion-sensitive
@@ -122,7 +128,11 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_NVFP4_REPO` | `lilcheaty/MiniMax-H3-NVFP4` | Repository containing the pruned Comfy-format transformer. |
 | `H3_NVFP4_FILE` | `minimax_h3_fl2va_pruned_nvfp4.safetensors` | FL2VA/T2VA transformer file. |
 | `H3_MODEL_REPO` | `MiniMaxAI/MiniMax-H3` | Canonical schedulers and VAE checkpoint. |
-| `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | Remote layer-50 conditioner Space. |
+| `H3_CONDITIONER_MODE` | `local` | Use the local truncated conditioner; `remote` restores the split deployment. |
+| `H3_LOCAL_CONDITIONER_REPO` | `Comfy-Org/MiniMax-H3` | Repository containing the truncated conditioner. |
+| `H3_LOCAL_CONDITIONER_FILE` | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | Local layer-50 conditioner checkpoint. |
+| `H3_CONDITIONER_NATIVE_NVFP4` | `0` | Use native W4A4 conditioner GEMMs for maximum speed; default BF16 GEMMs add less activation error. |
+| `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | Prompt-upsampling and local-load fallback service. |
 | `H3_PLACEMENT` | `lazy` (`nvfp4`) | Move the compact transformer and VAEs on the first GPU call, then keep them resident. |
 | `H3_ATTENTION` | `_native_cudnn` | Attention backend for both the main stack and text refiner. |
 | `H3_EASYCACHE_THRESHOLD` | `0.10` | Maximum accumulated estimated change before a full denoiser evaluation; `0` disables reuse. |
@@ -139,10 +149,13 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 - `comfy-kitchen==0.2.26` for the native layouts and fused Q/K kernel.
 - The pinned MiniMax-H3 diffusers pull request for the modular schedulers, packing and VAE decode path.
 
-No secret is required. All model artifacts are public, and `gradio_client` forwards the requesting user's ZeroGPU
-identity to the conditioner.
+No secret is required. All model artifacts are public. Normal requests use one local GPU booking; a prompt-upsampling
+request forwards the requesting user's ZeroGPU identity to the remote rewriter/conditioner.
 
 ## Attribution
+
+This is an optimized derivative of the original
+[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space.
 
 The fused/pruned model structure follows
 [`comfy/ldm/minimax/model.py`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/ldm/minimax/model.py) from

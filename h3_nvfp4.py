@@ -172,6 +172,7 @@ class H3Linear(nn.Module):
         self.register_buffer("input_scale", None)
         self.register_buffer("pre_quant_scale", None)
         self.quantized = False
+        self.full_precision_mm = False
 
     def load(self, handle, prefix: str) -> None:
         config = _quant_config(handle, prefix)
@@ -197,6 +198,7 @@ class H3Linear(nn.Module):
             quantized = QuantizedTensor(weight.to(torch.uint8), "TensorCoreNVFP4Layout", params)
             self.weight = nn.Parameter(quantized, requires_grad=False)
             self.quantized = True
+            self.full_precision_mm = bool(config.get("full_precision_matrix_mult", False))
             for name in ("input_scale", "pre_quant_scale"):
                 key = f"{prefix}.{name}"
                 if key in handle.keys():
@@ -223,6 +225,12 @@ class H3Linear(nn.Module):
                 self.weight,
                 self.bias,
             )
+
+        if self.full_precision_mm:
+            # Some AWQ checkpoints use NVFP4 as a compact weight format but deliberately retain BF16 activations and
+            # GEMMs. Dequantization is layer-local, so residency stays compact without adding activation error.
+            weight = self.weight.dequantize().to(hidden_states.dtype)
+            return F.linear(hidden_states, weight, None if self.bias is None else self.bias.to(hidden_states.dtype))
 
         from comfy_kitchen.tensor import QuantizedTensor
 
