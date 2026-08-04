@@ -153,7 +153,7 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 
 ## Runtime requirements
 
-- PyTorch 2.11 with CUDA 13.0.
+- PyTorch 2.13 with CUDA 13.0.
 - A Blackwell GPU (`sm120` for this Space). NVFP4 on older architectures is emulated and can be slower than BF16.
 - `comfy-kitchen==0.2.26` for the native layouts and fused Q/K kernel.
 - The pinned MiniMax-H3 diffusers pull request for the modular schedulers, packing and VAE decode path.
