@@ -484,7 +484,8 @@ INTRO = """# MiniMax-H3 Ultra Fast
 </div>
 
 **MiniMax-H3 Ultra Fast** runs a local truncated Qwen3-VL conditioner and the pruned Blackwell-native NVFP4
-transformer with fused QKV, fused Q/K norm + RoPE, full-precision video/audio decoders, and synchronized sound.
+transformer with fused QKV, fused Q/K norm + RoPE, full-precision video/audio decoders, and synchronized sound. Its
+default 16-step trajectory uses only **7 exact DiT evaluations** plus **9 bounded linear residual forecasts**.
 It is optimized from the original [`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3)
 Space.
 """
