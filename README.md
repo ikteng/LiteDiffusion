@@ -160,7 +160,7 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_SOL_ATTN_TAU` | `1.0` | Official H3 sparse-routing threshold. |
 | `H3_SOL_ATTN_DENSE_STEPS` | `10` | Initial denoising steps kept on exact dense attention. |
 | `H3_SOL_ATTN_DENSE_LAYERS` | `2` | Initial transformer blocks kept on exact dense attention. |
-| `H3_SOL_ATTN_MIN_TOKENS` | `8192` | Skip sparse-kernel overhead on shorter packed sequences. |
+| `H3_SOL_ATTN_MIN_TOKENS` | `24576` | Keep faster dense cuDNN attention on medium sequences; sparsify only long packed sequences. |
 | `H3_GPU_SIZE` | `xlarge` | 95 GiB Blackwell ZeroGPU allocation. |
 | `H3_AOTI` | `0` | BF16 engine only: load the optional repeated-block AoTI package. |
 

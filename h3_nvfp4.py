@@ -64,7 +64,7 @@ SOL_ATTN_BACKEND = os.environ.get("H3_SOL_ATTN_BACKEND", "triton").lower()
 SOL_ATTN_TAU = float(os.environ.get("H3_SOL_ATTN_TAU", "1.0"))
 SOL_ATTN_DENSE_STEPS = max(0, int(os.environ.get("H3_SOL_ATTN_DENSE_STEPS", "10")))
 SOL_ATTN_DENSE_LAYERS = max(0, int(os.environ.get("H3_SOL_ATTN_DENSE_LAYERS", "2")))
-SOL_ATTN_MIN_TOKENS = max(0, int(os.environ.get("H3_SOL_ATTN_MIN_TOKENS", "8192")))
+SOL_ATTN_MIN_TOKENS = max(0, int(os.environ.get("H3_SOL_ATTN_MIN_TOKENS", "24576")))
 
 
 if triton is not None:
