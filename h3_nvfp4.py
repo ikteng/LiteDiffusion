@@ -52,7 +52,7 @@ EASYCACHE_START = min(1.0, max(0.0, float(os.environ.get("H3_EASYCACHE_START", "
 EASYCACHE_END = min(1.0, max(EASYCACHE_START, float(os.environ.get("H3_EASYCACHE_END", "0.95"))))
 EASYCACHE_SUBSAMPLE = max(1, int(os.environ.get("H3_EASYCACHE_SUBSAMPLE", "8")))
 FORECAST_BLEND = min(1.0, max(0.0, float(os.environ.get("H3_FORECAST_BLEND", "0.65"))))
-FUSED_ADALN = os.environ.get("H3_FUSED_ADALN", "1") == "1" and triton is not None
+FUSED_ADALN = os.environ.get("H3_FUSED_ADALN", "0") == "1" and triton is not None
 
 
 if triton is not None:
