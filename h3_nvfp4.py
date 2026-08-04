@@ -208,15 +208,19 @@ class H3StepCache:
             self.previous_input = self.pending_input.clone()
             self.previous_output = sampled_output.clone()
             self.previous_output_norm = sampled_output.abs().mean()
+            if not self.profile.startswith("ultra"):
+                self.video_residual = (video_output - video_input).detach()
+                self.audio_residual = (audio_output - audio_input).detach()
             self.accumulated_change = None
-        new_video_residual = (video_output - video_input).detach()
-        new_audio_residual = (audio_output - audio_input).detach()
-        if self.video_residual is not None and self.last_actual_step is not None:
-            gap = max(1, self.step - self.last_actual_step)
-            self.video_residual_slope = (new_video_residual - self.video_residual) / gap
-            self.audio_residual_slope = (new_audio_residual - self.audio_residual) / gap
-        self.video_residual = new_video_residual
-        self.audio_residual = new_audio_residual
+        if self.profile.startswith("ultra"):
+            new_video_residual = (video_output - video_input).detach()
+            new_audio_residual = (audio_output - audio_input).detach()
+            if self.video_residual is not None and self.last_actual_step is not None:
+                gap = max(1, self.step - self.last_actual_step)
+                self.video_residual_slope = (new_video_residual - self.video_residual) / gap
+                self.audio_residual_slope = (new_audio_residual - self.audio_residual) / gap
+            self.video_residual = new_video_residual
+            self.audio_residual = new_audio_residual
         self.last_actual_step = self.step
         self.consecutive_skips = 0
         self.step += 1
@@ -452,8 +456,12 @@ class H3AdaLN(nn.Module):
     def load(self, handle, prefix: str) -> None:
         self.linear.load(handle, f"{prefix}.linear")
 
-    def forward(self, time_embedding):
+    def forward(self, time_embedding, output_dtype=None):
         projected = self.linear(time_embedding)
+        if output_dtype is not None:
+            # One contiguous conversion is numerically identical to converting the six chunk views independently,
+            # and removes five CUDA launches from every one of the 50 blocks.
+            projected = projected.to(output_dtype)
         projected = projected.view(-1, self.expand * HIDDEN)
         return projected.chunk(self.expand, dim=-1)
 
@@ -518,6 +526,8 @@ class H3NVFP4Transformer(nn.Module):
         self._segment_cache = None
         self._condition_video_rows = None
         self._condition_video_embedding = None
+        self._output_indices = None
+        self._generated_rows = None
         self._step_cache = H3StepCache()
 
     @property
@@ -557,6 +567,8 @@ class H3NVFP4Transformer(nn.Module):
         self._segment_cache = None
         self._condition_video_rows = None
         self._condition_video_embedding = None
+        self._output_indices = None
+        self._generated_rows = None
         self._step_cache.begin(total_steps, profile)
 
     def end_request(self) -> dict:
@@ -566,6 +578,8 @@ class H3NVFP4Transformer(nn.Module):
         self._segment_cache = None
         self._condition_video_rows = None
         self._condition_video_embedding = None
+        self._output_indices = None
+        self._generated_rows = None
         return stats
 
     def _refine_text(self, text_states: torch.Tensor) -> torch.Tensor:
@@ -714,7 +728,7 @@ class H3NVFP4Transformer(nn.Module):
 
         for block in self.blocks:
             # One conversion per small modulation table, rather than one conversion per sequence segment.
-            modulations = tuple(value.to(packed.dtype) for value in block.adaln_proj(time_embedding))
+            modulations = block.adaln_proj(time_embedding, packed.dtype)
             shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = modulations
             normalized = self._modulate(block.norm1(packed), shift_attn, scale_attn, adaln_indices, segments)
             packed = self._gate(
@@ -727,14 +741,18 @@ class H3NVFP4Transformer(nn.Module):
             normalized = self._modulate(block.norm2(packed), shift_mlp, scale_mlp, adaln_indices, segments)
             packed = self._gate(packed, block.mlp(normalized), gate_mlp, adaln_indices, segments)
 
-        normalized = self.final_layer.norm(packed)
         shift, scale = self.final_layer.adaln_proj(time_embedding)
 
         # Keyframe output rows are discarded by the scheduler. Avoid their FP32 output projection and put zeros in
         # those unused slots to retain the pipeline's expected tensor shape.
         generated_video_indices = video_indices[condition_rows:]
+        if self._output_indices is None:
+            self._generated_rows = generated_video_indices.shape[0]
+            self._output_indices = torch.cat((generated_video_indices, audio_indices))
+        generated_rows = self._generated_rows
+        normalized_output = self.final_layer.norm(packed.index_select(0, self._output_indices))
         video_times = timestep_indices.index_select(0, generated_video_indices)
-        video_hidden = normalized.index_select(0, generated_video_indices)
+        video_hidden = normalized_output[:generated_rows]
         video_hidden = video_hidden * (1.0 + scale.index_select(0, video_times)) + shift.index_select(0, video_times)
         generated_video_output = self.final_layer.video_out(video_hidden.float())
         if condition_rows:
@@ -744,7 +762,7 @@ class H3NVFP4Transformer(nn.Module):
             video_output = generated_video_output.unsqueeze(0)
 
         audio_times = timestep_indices.index_select(0, audio_indices)
-        audio_hidden = normalized.index_select(0, audio_indices)
+        audio_hidden = normalized_output[generated_rows:]
         audio_hidden = audio_hidden * (1.0 + scale.index_select(0, audio_times)) + shift.index_select(0, audio_times)
         audio_output = self.final_layer.audio_out(audio_hidden.float()).unsqueeze(0)
 
