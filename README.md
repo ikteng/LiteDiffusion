@@ -13,33 +13,33 @@ suggested_hardware: zero-a10g
 
 # MiniMax-H3 Ultra Fast — local conditioner + pruned NVFP4 on Blackwell
 
-Joint video and synchronized sound from MiniMax-H3, with the repeatedly executed transformer rebuilt around the
-Blackwell-native ComfyUI optimization path:
+Joint video and synchronized sound from MiniMax-H3, rebuilt for a single 96 GB Blackwell ZeroGPU worker.
 
-- 12.5 GB pruned NVFP4 transformer instead of the 61.7 GiB BF16 inference transformer.
-- 20.1B effective inference parameters instead of 33.1B; the redundant 13.04B AdaLN projection weights become a
-  compact sampled timestep curve.
-- One fused QKV projection per attention layer.
-- One fused in-place Q/K RMSNorm + partial split-half RoPE kernel.
-- Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`.
-- A local 15.7 GB Qwen3-VL NVFP4-AWQ conditioner replaces the normal cross-Space API call. It contains exactly the
-  first 50 language layers H3 reads, with the unused 14-layer tail and vocabulary head removed.
-- The default 28-step Balanced schedule uses NVIDIA Sol-Engine's H3 FirstBlockCache: block 1 is evaluated as a
-  high-signal change probe before deciding whether blocks 2–50 can reuse their previous joint residual. An optional
-  Ultra Fast mode forecasts between exact anchors, while Exact evaluates every requested step. This is not
-  prompt-to-video output caching.
-- NVIDIA Sol-Attn's released Triton kernel sparsifies target-video attention after a dense warmup while retaining text,
-  conditioning-video and generated-audio rows as an exact KV sink with dense prefix queries.
-- Segment-wise in-place AdaLN modulation and gated residual accumulation.
-- Each block converts its complete AdaLN table in one launch instead of six, and the final RMSNorm runs only on
-  generated video/audio rows whose outputs are retained.
-- Optional exact Triton AdaLN modulation/gating kernels can replace hundreds of tiny per-segment launches on
-  persistent workers; they remain off on ZeroGPU because their cold compilation cost is too high.
-- Video and audio output heads run only on their own rows, not the full packed sequence.
-- Prompt refinement and the rotary table are cached for the request instead of recomputed at every denoising step.
-- Static keyframe patch projections are computed once, packed buffers avoid a redundant full zero-fill, and cached
-  segment metadata uses CPU scalar row ids rather than repeated CUDA-scalar indexing.
-- The video VAE and audio VAE remain full precision.
+## Active optimization stack
+
+| layer | optimization |
+|---|---|
+| Weights | 12.5 GB pruned NVFP4 transformer: 20.1B effective parameters instead of 33.1B/61.7 GiB BF16. |
+| Compute | Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`; higher-precision norms, embeddings and output heads. |
+| Residency | Transformer, conditioner and both VAEs remain GPU-resident during generation—no layerwise CPU offload. |
+| Conditioner | Local 15.7 GB Qwen3-VL NVFP4-AWQ checkpoint containing only the 50 language layers H3 uses; no normal cross-Space encode round trip. |
+| AdaLN | 13.04B projection parameters replaced by a 1,025-point timestep curve; one table conversion per block, segment-wise in-place modulation/gating. |
+| Attention projections | One fused QKV matrix and one fused in-place Q/K RMSNorm + partial split-half RoPE kernel per block. |
+| Attention | cuDNN dense attention for short/medium sequences; NVIDIA Sol-Attn Triton routing only above 24,576 packed tokens. |
+| Sol-Attn quality guard | First 10 steps and first 2 blocks stay dense; text, conditioning video and generated audio remain exact KV/query rows. |
+| Step reuse | 28-step Balanced uses NVIDIA H3 FirstBlockCache at `0.08`, with 3 dense warmup and 2 dense tail steps. |
+| Aggressive mode | Ultra Fast keeps its scheduler trajectory but forecasts the joint video/audio residual between bounded exact anchors. |
+| Exact mode | Disables block reuse and sparse attention while retaining the lossless kernel/layout optimizations. |
+| MLP | Fused gate/up checkpoint layout, in-place SiLU×up, native NVFP4 down projection. |
+| Output | Final RMSNorm and video/audio heads run only on retained generated rows; discarded conditioning rows bypass FP32 projection. |
+| Request-static work | Text refinement, RoPE, segment metadata and keyframe patch projections are cached once per request. |
+| Memory traffic | Packed buffers skip redundant zero-fill; cached segment rows avoid repeated CUDA-scalar indexing; hot dispatch lookups are hoisted. |
+| Decode/output | Video and audio VAEs remain full precision; muxing stays outside the denoiser. |
+| Reliability | Automatic retry replaces unhealthy ZeroGPU workers on transient ECC/CUDA initialization failures. |
+
+This is inference-work caching, not prompt-to-video result caching: every prompt and seed starts with fresh latents
+and request-local state. On a warm 960×544, 56-frame, 28-step comparison, Balanced reduced 27 full DiT evaluations
+to 20 plus 7 cached block-stack reuses, taking denoise + decode from 35 seconds to 23 seconds (~1.52×).
 
 The source model is [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3). The pruned NVFP4
 checkpoint is
@@ -146,10 +146,6 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | Prompt-upsampling and local-load fallback service. |
 | `H3_PLACEMENT` | `lazy` (`nvfp4`) | Move the compact transformer and VAEs on the first GPU call, then keep them resident. |
 | `H3_ATTENTION` | `_native_cudnn` | Attention backend for both the main stack and text refiner. |
-| `H3_EASYCACHE_THRESHOLD` | `0.10` | Balanced-mode maximum accumulated estimated change before a full denoiser evaluation. |
-| `H3_EASYCACHE_START` | `0.15` | Fraction of the schedule before which every step is evaluated. |
-| `H3_EASYCACHE_END` | `0.95` | Fraction of the schedule after which every step is evaluated. |
-| `H3_EASYCACHE_SUBSAMPLE` | `8` | Generated-video row stride used by the inexpensive change estimator. |
 | `H3_FIRST_BLOCK_THRESHOLD` | `0.08` | Balanced-mode normalized first-block residual threshold, matching NVIDIA's H3 preset. |
 | `H3_FIRST_BLOCK_DENSE_START` | `3` | Dense warmup steps retained before FirstBlockCache may reuse blocks 2–50. |
 | `H3_FIRST_BLOCK_DENSE_END` | `2` | Dense tail steps retained after FirstBlockCache reuse is disabled. |
@@ -174,6 +170,21 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 No secret is required. All model artifacts are public. Normal requests use one local GPU booking; a prompt-upsampling
 request forwards the requesting user's ZeroGPU identity to the remote rewriter/conditioner.
 
+## How the optimizations fit together
+
+The largest structural win happens before sampling: NVFP4 makes the pruned transformer small enough to stay beside
+the local conditioner and full-precision VAEs on one worker. That removes both per-layer host transfers and the old
+remote conditioning handoff. Fused layouts then reduce launches and wide activation traffic inside every block.
+
+Balanced attacks repeated denoising work without reducing the requested 28 scheduler steps. It always evaluates the
+first transformer block, compares that block's residual with the previous exact step, and only reuses the cached
+residual of blocks 2–50 when the official H3 signal is below threshold. Exact keeps this probe disabled. Sol-Attn is
+orthogonal: it sparsifies expensive long-sequence target-video attention, but is gated off wherever cuDNN is faster.
+
+Several plausible changes were benchmarked and deliberately not shipped: concurrent VAE decoding, combined AdaLN
+banks, PyTorch 2.13, and always-on Triton AdaLN kernels were slower, unsupported by ZeroGPU, or too expensive at cold
+start. The deployed path favors measured end-to-end latency rather than accumulating optimization flags.
+
 ## Attribution
 
 This is an optimized derivative of the original
@@ -185,3 +196,5 @@ ComfyUI (Apache-2.0). FirstBlockCache and Sol-Attn are adapted from NVIDIA's Apa
 [`MiniMax-H3 Sol-Engine`](https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3) release. The quantized checkpoint and its conversion notes are from
 [`lilcheaty/MiniMax-H3-NVFP4`](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4). MiniMax-H3 weights remain governed
 by the MiniMax-H3 Community License Agreement.
+
+H/t to **blanchon** for pointing me to NVIDIA Sana/Sol-Engine.
