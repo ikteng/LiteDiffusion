@@ -28,6 +28,8 @@ Blackwell-native ComfyUI optimization path:
   Fast mode forecasts between exact anchors, while Exact evaluates every requested step. This is not prompt-to-video
   output caching.
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
+- Exact Triton AdaLN modulation/gating kernels replace hundreds of tiny per-segment launches without changing the
+  requested denoising trajectory.
 - Video and audio output heads run only on their own rows, not the full packed sequence.
 - Prompt refinement and the rotary table are cached for the request instead of recomputed at every denoising step.
 - Static keyframe patch projections are computed once, packed buffers avoid a redundant full zero-fill, and cached
@@ -143,6 +145,7 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_EASYCACHE_END` | `0.95` | Fraction of the schedule after which every step is evaluated. |
 | `H3_EASYCACHE_SUBSAMPLE` | `8` | Generated-video row stride used by the inexpensive change estimator. |
 | `H3_FORECAST_BLEND` | `0.65` | Ultra Fast linear-trend strength; lower values stay closer to last-residual reuse. |
+| `H3_FUSED_ADALN` | `1` | Fuse each block's segmented AdaLN modulation and gate into one Triton kernel. |
 | `H3_GPU_SIZE` | `xlarge` | 95 GiB Blackwell ZeroGPU allocation. |
 | `H3_AOTI` | `0` | BF16 engine only: load the optional repeated-block AoTI package. |
 

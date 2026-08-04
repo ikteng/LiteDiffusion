@@ -21,6 +21,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    import triton
+    import triton.language as tl
+except ImportError:  # PyTorch CUDA wheels include Triton; retain a portable fallback for source inspection/tests.
+    triton = None
+    tl = None
+
 
 NVFP4_REPO = os.environ.get("H3_NVFP4_REPO", "lilcheaty/MiniMax-H3-NVFP4")
 NVFP4_FILE = os.environ.get("H3_NVFP4_FILE", "minimax_h3_fl2va_pruned_nvfp4.safetensors")
@@ -45,6 +52,39 @@ EASYCACHE_START = min(1.0, max(0.0, float(os.environ.get("H3_EASYCACHE_START", "
 EASYCACHE_END = min(1.0, max(EASYCACHE_START, float(os.environ.get("H3_EASYCACHE_END", "0.95"))))
 EASYCACHE_SUBSAMPLE = max(1, int(os.environ.get("H3_EASYCACHE_SUBSAMPLE", "8")))
 FORECAST_BLEND = min(1.0, max(0.0, float(os.environ.get("H3_FORECAST_BLEND", "0.65"))))
+FUSED_ADALN = os.environ.get("H3_FUSED_ADALN", "1") == "1" and triton is not None
+
+
+if triton is not None:
+
+    @triton.jit
+    def _adaln_modulate_kernel(
+        x, shift, scale, row_ids, elements: tl.constexpr, hidden: tl.constexpr, modulation_stride: tl.constexpr
+    ):
+        offsets = tl.program_id(0) * 256 + tl.arange(0, 256)
+        mask = offsets < elements
+        columns = offsets % hidden
+        rows = offsets // hidden
+        modulation_rows = tl.load(row_ids + rows, mask=mask, other=0)
+        modulation_offsets = modulation_rows * modulation_stride + columns
+        values = tl.load(x + offsets, mask=mask)
+        shifts = tl.load(shift + modulation_offsets, mask=mask)
+        scales = tl.load(scale + modulation_offsets, mask=mask)
+        tl.store(x + offsets, values * (1.0 + scales) + shifts, mask=mask)
+
+    @triton.jit
+    def _adaln_gate_kernel(
+        x, update, gate, row_ids, elements: tl.constexpr, hidden: tl.constexpr, modulation_stride: tl.constexpr
+    ):
+        offsets = tl.program_id(0) * 256 + tl.arange(0, 256)
+        mask = offsets < elements
+        columns = offsets % hidden
+        rows = offsets // hidden
+        modulation_rows = tl.load(row_ids + rows, mask=mask, other=0)
+        gates = tl.load(gate + modulation_rows * modulation_stride + columns, mask=mask)
+        values = tl.load(x + offsets, mask=mask)
+        updates = tl.load(update + offsets, mask=mask)
+        tl.store(x + offsets, values + updates * gates, mask=mask)
 
 
 class H3StepCache:
@@ -608,13 +648,23 @@ class H3NVFP4Transformer(nn.Module):
         return torch.cat((self._condition_video_embedding, generated), dim=0)
 
     @staticmethod
-    def _modulate(hidden, shift, scale, segments):
+    def _modulate(hidden, shift, scale, row_ids, segments):
+        if FUSED_ADALN and hidden.is_cuda and hidden.is_contiguous():
+            _adaln_modulate_kernel[(triton.cdiv(hidden.numel(), 256),)](
+                hidden, shift, scale, row_ids, hidden.numel(), HIDDEN, shift.stride(0), num_warps=4
+            )
+            return hidden
         for start, stop, row in segments:
             hidden[start:stop].mul_(1.0 + scale[row]).add_(shift[row])
         return hidden
 
     @staticmethod
-    def _gate(hidden, update, gate, segments):
+    def _gate(hidden, update, gate, row_ids, segments):
+        if FUSED_ADALN and hidden.is_cuda and hidden.is_contiguous() and update.is_contiguous():
+            _adaln_gate_kernel[(triton.cdiv(hidden.numel(), 256),)](
+                hidden, update, gate, row_ids, hidden.numel(), HIDDEN, gate.stride(0), num_warps=4
+            )
+            return hidden
         for start, stop, row in segments:
             hidden[start:stop].addcmul_(update[start:stop], gate[row])
         return hidden
@@ -666,15 +716,16 @@ class H3NVFP4Transformer(nn.Module):
             # One conversion per small modulation table, rather than one conversion per sequence segment.
             modulations = tuple(value.to(packed.dtype) for value in block.adaln_proj(time_embedding))
             shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = modulations
-            normalized = self._modulate(block.norm1(packed), shift_attn, scale_attn, segments)
+            normalized = self._modulate(block.norm1(packed), shift_attn, scale_attn, adaln_indices, segments)
             packed = self._gate(
                 packed,
                 block.attn(normalized, rope, self.attention_backend),
                 gate_attn,
+                adaln_indices,
                 segments,
             )
-            normalized = self._modulate(block.norm2(packed), shift_mlp, scale_mlp, segments)
-            packed = self._gate(packed, block.mlp(normalized), gate_mlp, segments)
+            normalized = self._modulate(block.norm2(packed), shift_mlp, scale_mlp, adaln_indices, segments)
+            packed = self._gate(packed, block.mlp(normalized), gate_mlp, adaln_indices, segments)
 
         normalized = self.final_layer.norm(packed)
         shift, scale = self.final_layer.adaln_proj(time_embedding)
