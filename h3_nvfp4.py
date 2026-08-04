@@ -13,6 +13,7 @@ https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/ldm/minimax/model.py
 from __future__ import annotations
 
 import json
+import math
 import os
 from types import SimpleNamespace
 
@@ -35,6 +36,114 @@ AUDIO_DIM = 32
 LAYERS = 50
 REFINER_LAYERS = 2
 EPS = 1e-5
+
+# EasyCache is a denoiser-internal approximation: it reuses a recent residual when the latent trajectory is changing
+# slowly.  Zero disables it and restores the exact NVFP4 path.  The conservative default is below ComfyUI's 0.20.
+EASYCACHE_THRESHOLD = max(0.0, float(os.environ.get("H3_EASYCACHE_THRESHOLD", "0.10")))
+EASYCACHE_START = min(1.0, max(0.0, float(os.environ.get("H3_EASYCACHE_START", "0.15"))))
+EASYCACHE_END = min(1.0, max(EASYCACHE_START, float(os.environ.get("H3_EASYCACHE_END", "0.95"))))
+EASYCACHE_SUBSAMPLE = max(1, int(os.environ.get("H3_EASYCACHE_SUBSAMPLE", "8")))
+
+
+class H3StepCache:
+    """ComfyUI EasyCache-style adaptive reuse of a complete H3 denoising result.
+
+    This caches the model residual, not the generated video.  A request with a new prompt, seed, canvas or keyframe
+    starts from an empty cache.  Decisions use a sparse sample of generated video latent rows, while the reused
+    residual contains every video and audio row so their joint denoising trajectory stays coupled.
+    """
+
+    def __init__(self):
+        self.total_steps = 0
+        self.step = 0
+        self.skipped = 0
+        self.previous_input = None
+        self.previous_output = None
+        self.previous_output_norm = None
+        self.relative_rate = None
+        self.accumulated_change = None
+        self.video_residual = None
+        self.audio_residual = None
+        self.pending_input = None
+        self.pending_input_change = None
+        self.pending_track = False
+
+    def begin(self, total_steps: int | None) -> None:
+        self.__init__()
+        self.total_steps = max(0, int(total_steps or 0))
+
+    @property
+    def enabled(self) -> bool:
+        return EASYCACHE_THRESHOLD > 0.0 and self.total_steps > 2
+
+    def try_reuse(self, video_input, audio_input, condition_rows: int):
+        self.pending_input = None
+        self.pending_input_change = None
+        self.pending_track = False
+        if not self.enabled:
+            return None
+
+        end_step = math.floor(self.total_steps * EASYCACHE_END)
+        if self.step >= end_step:
+            return None
+
+        # Condition latents are static. Excluding them makes the change estimate reflect the generated trajectory.
+        sampled_input = video_input[0, condition_rows::EASYCACHE_SUBSAMPLE].detach().float()
+        self.pending_input = sampled_input
+        self.pending_track = True
+        if self.previous_input is not None:
+            self.pending_input_change = (sampled_input - self.previous_input).abs().mean()
+
+        start_step = math.ceil(self.total_steps * EASYCACHE_START)
+        can_reuse = (
+            self.step >= start_step
+            and self.pending_input_change is not None
+            and self.relative_rate is not None
+            and self.previous_output_norm is not None
+            and self.video_residual is not None
+            and self.audio_residual is not None
+            and self.video_residual.shape == video_input.shape
+            and self.audio_residual.shape == audio_input.shape
+        )
+        if not can_reuse:
+            return None
+
+        estimated_change = self.relative_rate * self.pending_input_change
+        estimated_change = estimated_change / self.previous_output_norm.clamp_min(1e-6)
+        accumulated = estimated_change if self.accumulated_change is None else self.accumulated_change + estimated_change
+        if bool((accumulated < EASYCACHE_THRESHOLD).item()):
+            self.accumulated_change = accumulated
+            self.skipped += 1
+            self.step += 1
+            return video_input + self.video_residual, audio_input + self.audio_residual
+        return None
+
+    def update(self, video_input, audio_input, video_output, audio_output, condition_rows: int) -> None:
+        if self.pending_track:
+            sampled_output = video_output[0, condition_rows::EASYCACHE_SUBSAMPLE].detach().float()
+            if self.previous_output is not None and self.pending_input_change is not None:
+                output_change = (sampled_output - self.previous_output).abs().mean()
+                self.relative_rate = output_change / self.pending_input_change.clamp_min(1e-6)
+            self.previous_input = self.pending_input.clone()
+            self.previous_output = sampled_output.clone()
+            self.previous_output_norm = sampled_output.abs().mean()
+            self.video_residual = (video_output - video_input).detach()
+            self.audio_residual = (audio_output - audio_input).detach()
+            self.accumulated_change = None
+        self.step += 1
+        self.pending_input = None
+        self.pending_input_change = None
+        self.pending_track = False
+
+    def finish(self) -> None:
+        if self.enabled and self.step:
+            computed = max(1, self.step - self.skipped)
+            print(
+                f"[h3-nvfp4] adaptive step cache skipped {self.skipped}/{self.step} transformer evaluations "
+                f"({self.step / computed:.2f}x denoiser-work reduction)",
+                flush=True,
+            )
+        self.begin(None)
 
 
 def _quant_config(handle, prefix: str) -> dict | None:
@@ -302,7 +411,10 @@ class H3NVFP4Transformer(nn.Module):
         self.attention_backend = "_native_cudnn"
         self._text_cache = None
         self._rope_cache = None
-        self._segment_boundaries = None
+        self._segment_cache = None
+        self._condition_video_rows = None
+        self._condition_video_embedding = None
+        self._step_cache = H3StepCache()
 
     @property
     def dtype(self) -> torch.dtype:
@@ -335,13 +447,21 @@ class H3NVFP4Transformer(nn.Module):
     def set_attention_backend(self, backend: str) -> None:
         self.attention_backend = backend
 
-    def begin_request(self) -> None:
+    def begin_request(self, total_steps: int | None = None) -> None:
         self._text_cache = None
         self._rope_cache = None
-        self._segment_boundaries = None
+        self._segment_cache = None
+        self._condition_video_rows = None
+        self._condition_video_embedding = None
+        self._step_cache.begin(total_steps)
 
     def end_request(self) -> None:
-        self.begin_request()
+        self._step_cache.finish()
+        self._text_cache = None
+        self._rope_cache = None
+        self._segment_cache = None
+        self._condition_video_rows = None
+        self._condition_video_embedding = None
 
     def _refine_text(self, text_states: torch.Tensor) -> torch.Tensor:
         key = (text_states.data_ptr(), tuple(text_states.shape), text_states.device)
@@ -395,23 +515,43 @@ class H3NVFP4Transformer(nn.Module):
         return torch.lerp(table[lower], table[lower + 1], (position - lower).unsqueeze(1))
 
     def _segments(self, indices: torch.Tensor):
-        if self._segment_boundaries is None:
+        if self._segment_cache is None:
             host = indices.detach().cpu()
             changes = (host[1:] != host[:-1]).nonzero().flatten().add(1).tolist()
-            self._segment_boundaries = [0, *changes, len(host)]
-        bounds = self._segment_boundaries
-        return [(a, b, indices[a]) for a, b in zip(bounds[:-1], bounds[1:])]
+            bounds = [0, *changes, len(host)]
+            # Python row ids avoid indexing modulation tensors with CUDA scalar tensors in every block.
+            self._segment_cache = [
+                (start, stop, int(host[start])) for start, stop in zip(bounds[:-1], bounds[1:])
+            ]
+        return self._segment_cache
+
+    def _video_layout(self, video_indices: torch.Tensor) -> int:
+        """Number of leading, static keyframe-patch rows in the video latent tensor."""
+        if self._condition_video_rows is None:
+            host = video_indices.detach().cpu()
+            discontinuities = (host[1:] - host[:-1] != 1).nonzero().flatten()
+            self._condition_video_rows = int(discontinuities[0]) + 1 if len(discontinuities) else 0
+        return self._condition_video_rows
+
+    def _project_video(self, hidden_states: torch.Tensor, condition_rows: int, dtype: torch.dtype) -> torch.Tensor:
+        source = hidden_states[0]
+        if condition_rows == 0:
+            return self.video_patch_proj(source.float()).to(dtype)
+        if self._condition_video_embedding is None:
+            self._condition_video_embedding = self.video_patch_proj(source[:condition_rows].float()).to(dtype)
+        generated = self.video_patch_proj(source[condition_rows:].float()).to(dtype)
+        return torch.cat((self._condition_video_embedding, generated), dim=0)
 
     @staticmethod
     def _modulate(hidden, shift, scale, segments):
         for start, stop, row in segments:
-            hidden[start:stop].mul_(1.0 + scale[row].to(hidden.dtype)).add_(shift[row].to(hidden.dtype))
+            hidden[start:stop].mul_(1.0 + scale[row]).add_(shift[row])
         return hidden
 
     @staticmethod
     def _gate(hidden, update, gate, segments):
         for start, stop, row in segments:
-            hidden[start:stop].addcmul_(update[start:stop], gate[row].to(hidden.dtype))
+            hidden[start:stop].addcmul_(update[start:stop], gate[row])
         return hidden
 
     def forward(
@@ -434,10 +574,20 @@ class H3NVFP4Transformer(nn.Module):
         if hidden_states.shape[0] != 1:
             raise ValueError("The NVFP4 MiniMax-H3 engine supports batch size 1.")
 
+        condition_rows = self._video_layout(video_indices)
+        reused = self._step_cache.try_reuse(hidden_states, audio_hidden_states, condition_rows)
+        if reused is not None:
+            video_output, audio_output = reused
+            if not return_dict:
+                return video_output, audio_output
+            return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
+
         text = self._refine_text(encoder_hidden_states[0].to(torch.bfloat16))
-        video = self.video_patch_proj(hidden_states[0].float()).to(text.dtype)
+        video = self._project_video(hidden_states, condition_rows, text.dtype)
         audio = self.audio_patch_proj(audio_hidden_states[0].float()).to(text.dtype)
-        packed = text.new_zeros((position_ids.shape[0], HIDDEN))
+        # Text, video and audio indices partition the packed sequence, so initialization would only add a full HBM
+        # write before the three index copies overwrite every row.
+        packed = text.new_empty((position_ids.shape[0], HIDDEN))
         packed.index_copy_(0, text_indices, text)
         packed.index_copy_(0, video_indices, video)
         packed.index_copy_(0, audio_indices, audio)
@@ -448,7 +598,9 @@ class H3NVFP4Transformer(nn.Module):
         rope = self._rope(position_ids, packed.dtype)
 
         for block in self.blocks:
-            shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = block.adaln_proj(time_embedding)
+            # One conversion per small modulation table, rather than one conversion per sequence segment.
+            modulations = tuple(value.to(packed.dtype) for value in block.adaln_proj(time_embedding))
+            shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = modulations
             normalized = self._modulate(block.norm1(packed), shift_attn, scale_attn, segments)
             packed = self._gate(
                 packed,
@@ -462,15 +614,31 @@ class H3NVFP4Transformer(nn.Module):
         normalized = self.final_layer.norm(packed)
         shift, scale = self.final_layer.adaln_proj(time_embedding)
 
-        video_times = timestep_indices.index_select(0, video_indices)
-        video_hidden = normalized.index_select(0, video_indices)
+        # Keyframe output rows are discarded by the scheduler. Avoid their FP32 output projection and put zeros in
+        # those unused slots to retain the pipeline's expected tensor shape.
+        generated_video_indices = video_indices[condition_rows:]
+        video_times = timestep_indices.index_select(0, generated_video_indices)
+        video_hidden = normalized.index_select(0, generated_video_indices)
         video_hidden = video_hidden * (1.0 + scale.index_select(0, video_times)) + shift.index_select(0, video_times)
-        video_output = self.final_layer.video_out(video_hidden.float()).unsqueeze(0)
+        generated_video_output = self.final_layer.video_out(video_hidden.float())
+        if condition_rows:
+            video_output = generated_video_output.new_zeros((1, hidden_states.shape[1], VIDEO_DIM))
+            video_output[0, condition_rows:] = generated_video_output
+        else:
+            video_output = generated_video_output.unsqueeze(0)
 
         audio_times = timestep_indices.index_select(0, audio_indices)
         audio_hidden = normalized.index_select(0, audio_indices)
         audio_hidden = audio_hidden * (1.0 + scale.index_select(0, audio_times)) + shift.index_select(0, audio_times)
         audio_output = self.final_layer.audio_out(audio_hidden.float()).unsqueeze(0)
+
+        self._step_cache.update(
+            hidden_states,
+            audio_hidden_states,
+            video_output,
+            audio_output,
+            condition_rows,
+        )
 
         if not return_dict:
             return video_output, audio_output
@@ -490,4 +658,5 @@ def load_transformer() -> H3NVFP4Transformer:
 
 
 def status() -> str:
-    return f"NVFP4 · pruned AdaLN curve · fused QKV/QK-norm/RoPE · `{NVFP4_REPO}`"
+    cache = f"adaptive step cache {EASYCACHE_THRESHOLD:g}" if EASYCACHE_THRESHOLD else "exact steps"
+    return f"NVFP4 · {cache} · pruned AdaLN curve · fused QKV/QK-norm/RoPE · `{NVFP4_REPO}`"

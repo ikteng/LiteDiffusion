@@ -22,9 +22,13 @@ Blackwell-native ComfyUI optimization path:
 - One fused QKV projection per attention layer.
 - One fused in-place Q/K RMSNorm + partial split-half RoPE kernel.
 - Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`.
+- A conservative EasyCache-style trajectory estimator skips complete 50-layer denoiser evaluations when successive
+  latent changes are predictable; it is request-local and is not prompt-to-video output caching.
 - Segment-wise in-place AdaLN modulation and gated residual accumulation.
 - Video and audio output heads run only on their own rows, not the full packed sequence.
 - Prompt refinement and the rotary table are cached for the request instead of recomputed at every denoising step.
+- Static keyframe patch projections are computed once, packed buffers avoid a redundant full zero-fill, and cached
+  segment metadata uses CPU scalar row ids rather than repeated CUDA-scalar indexing.
 - The video VAE and audio VAE remain full precision.
 
 The source model is [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3). The pruned NVFP4
@@ -90,14 +94,22 @@ Attention itself stays on diffusers' `_native_cudnn` backend, which is faster th
 ZeroGPU RTX PRO 6000 pool. The MLP uses one fused QKV-style gate/up matrix, in-place SiLU×up, and the NVFP4 down
 projection.
 
+Above that exact kernel path, adaptive step reuse tracks the relative change between sparsely sampled input and
+output video latents. During the middle 80% of the schedule, it reuses the most recent full video+audio model
+residual only while the accumulated estimated output change remains below `0.10`; otherwise it immediately runs the
+transformer and recalibrates. The Space log reports the actual skipped-step count and denoiser-work reduction for
+each request. Different prompts and seeds never share this state.
+
 The old BF16/AoTI engine remains available with `H3_ENGINE=bf16`. It is useful as a quality/debug reference, but it is
 not the default.
 
 ## Quality trade-off
 
-NVFP4 is approximate. The checkpoint author reports that 4-bit weights can show more mid-motion artifacts and weaker
-shape retention than the larger INT8 ConvRot checkpoint on difficult 15-second clips. The comparison was not fully
-controlled, so treat it as a real caution rather than a quantified quality score.
+NVFP4 and adaptive step reuse are approximate. The checkpoint author reports that 4-bit weights can show more
+mid-motion artifacts and weaker shape retention than the larger INT8 ConvRot checkpoint on difficult 15-second
+clips. The comparison was not fully controlled, so treat it as a real caution rather than a quantified quality
+score. Adaptive reuse adds another speed/quality trade-off; lower `H3_EASYCACHE_THRESHOLD` for motion-sensitive
+clips, or set it to `0` for all 28 transformer evaluations.
 
 The Space keeps both VAEs full precision and leaves AdaLN, norms, embeddings and output heads out of NVFP4. For the
 exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquantized transformer and its AoTI option.
@@ -113,6 +125,10 @@ exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquan
 | `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | Remote layer-50 conditioner Space. |
 | `H3_PLACEMENT` | `lazy` (`nvfp4`) | Move the compact transformer and VAEs on the first GPU call, then keep them resident. |
 | `H3_ATTENTION` | `_native_cudnn` | Attention backend for both the main stack and text refiner. |
+| `H3_EASYCACHE_THRESHOLD` | `0.10` | Maximum accumulated estimated change before a full denoiser evaluation; `0` disables reuse. |
+| `H3_EASYCACHE_START` | `0.15` | Fraction of the schedule before which every step is evaluated. |
+| `H3_EASYCACHE_END` | `0.95` | Fraction of the schedule after which every step is evaluated. |
+| `H3_EASYCACHE_SUBSAMPLE` | `8` | Generated-video row stride used by the inexpensive change estimator. |
 | `H3_GPU_SIZE` | `xlarge` | 95 GiB Blackwell ZeroGPU allocation. |
 | `H3_AOTI` | `0` | BF16 engine only: load the optional repeated-block AoTI package. |
 
@@ -130,6 +146,7 @@ identity to the conditioner.
 
 The fused/pruned model structure follows
 [`comfy/ldm/minimax/model.py`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/ldm/minimax/model.py) from
-ComfyUI (Apache-2.0). The quantized checkpoint and its conversion notes are from
+ComfyUI (Apache-2.0), and the adaptive residual estimator follows ComfyUI's built-in
+[`EasyCache`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_easycache.py) design. The quantized checkpoint and its conversion notes are from
 [`lilcheaty/MiniMax-H3-NVFP4`](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4). MiniMax-H3 weights remain governed
 by the MiniMax-H3 Community License Agreement.

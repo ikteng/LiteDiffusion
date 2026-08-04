@@ -253,7 +253,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     begin_request = getattr(PIPE.transformer, "begin_request", None)
     end_request = getattr(PIPE.transformer, "end_request", None)
     if begin_request is not None:
-        begin_request()
+        begin_request(int(steps))
     try:
         with torch.inference_mode():
             state = PIPE(
