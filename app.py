@@ -253,6 +253,7 @@ _DUR_B, _DUR_C = 1.1745e-4, 3.8396e-9
 _DECODE_BASE, _DECODE_PER_DEFAULT_CANVAS, _DEFAULT_CANVAS_PIXELS = 15, 15, 960 * 544 * 124
 # `pack` mode: only the ~10 GB of VAEs move on a cold worker.
 _PLACEMENT_ALLOWANCE, _PAD = 12, 10
+_RETRYABLE_GPU_ERRORS = ("uncorrectable ECC error", "cudaErrorECCUncorrectable")
 
 
 def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
@@ -330,6 +331,21 @@ def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height,
     )
 
 
+def _generate_with_hardware_retry(*args):
+    """Resubmit once when ZeroGPU assigns a worker with a fatal ECC fault.
+
+    The exception is raised by ``spaces`` before ``_generate`` begins, so CUDA cleanup inside the worker cannot repair
+    it. A fresh decorated call lets the scheduler select another GPU. All application errors propagate immediately.
+    """
+    try:
+        return _generate(*args)
+    except Exception as error:
+        if not any(marker in str(error) for marker in _RETRYABLE_GPU_ERRORS):
+            raise
+        print(f"[gpu] unhealthy ZeroGPU worker ({error}); resubmitting once", flush=True)
+        return _generate(*args)
+
+
 def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
@@ -381,7 +397,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         + f"denoising {steps} steps at {width}x{height}, {num_frames} frames ...",
     )
     started = time.time()
-    frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens = _generate(
+    frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens = _generate_with_hardware_retry(
         prompt,
         prompt_embeds,
         text_token_tags,
