@@ -491,6 +491,8 @@ transformer with fused QKV, fused Q/K norm + RoPE, full-precision video/audio de
 default **28-step Balanced** mode uses conservative adaptive reuse; the aggressive forecast mode is optional.
 It is optimized from the original [`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3)
 Space.
+
+If you find this Space helpful, please give it a like <3
 """
 
 CSS = """
