@@ -10,6 +10,9 @@ export type PresetOption = {
   description: string;
   recommended: boolean;
   custom: boolean;
+  /** Scheduler steps the server substitutes for this preset. Drives the GPU-budget estimate. */
+  steps: number;
+  acceleration: Acceleration;
 };
 
 export type PromptExample = {
@@ -28,6 +31,9 @@ export type StudioConfig = {
   examples: PromptExample[];
 };
 
+export type Acceleration = "Balanced" | "Ultra Fast" | "Exact";
+export type LoraPreset = "None" | "Turbo · 4 steps" | "Turbo · 8 steps" | "Custom";
+
 export type GenerationValues = {
   prompt: string;
   image: File | null;
@@ -38,8 +44,8 @@ export type GenerationValues = {
   upsample: boolean;
   preset: string;
   steps: number;
-  acceleration: "Balanced" | "Ultra Fast" | "Exact";
-  loraPreset: "None" | "Turbo · 4 steps" | "Turbo · 8 steps" | "Custom";
+  acceleration: Acceleration;
+  loraPreset: LoraPreset;
   loraRepo: string;
   loraFilename: string;
   loraStrength: number;
@@ -51,6 +57,8 @@ export type GeneratedVideo = {
   refinedPrompt: string;
 };
 
+export type RunPhase = "queue" | "conditioning" | "gpu" | "denoising" | "finalizing";
+
 export type RunProgress = {
   stage: "idle" | "connecting" | "queued" | "generating" | "complete" | "error";
   label: string;
@@ -61,9 +69,16 @@ export type RunProgress = {
   length?: number;
   unit?: string;
   exact?: boolean;
-  phase?: "queue" | "conditioning" | "gpu" | "denoising" | "finalizing";
+  phase?: RunPhase;
 };
 
+export type ModelStatus = {
+  ready: boolean;
+  status: string;
+  reachable: boolean;
+};
+
+/** Used until `/studio-config` answers, and by `npm run dev` with no Python server running. */
 export const FALLBACK_CONFIG: StudioConfig = {
   canvases: [
     { label: "960x544 · 16:9 fast", width: 960, height: 544, fast: true },
@@ -76,6 +91,12 @@ export const FALLBACK_CONFIG: StudioConfig = {
     { label: "768x1344 · 9:16 full", width: 768, height: 1344, fast: false },
     { label: "544x544 · 1:1 fast", width: 544, height: 544, fast: true },
     { label: "768x768 · 1:1 full", width: 768, height: 768, fast: false },
+    { label: "768x576 · 4:3 fast", width: 768, height: 576, fast: true },
+    { label: "1024x768 · 4:3 full", width: 1024, height: 768, fast: false },
+    { label: "576x768 · 3:4 fast", width: 576, height: 768, fast: true },
+    { label: "768x1024 · 3:4 full", width: 768, height: 1024, fast: false },
+    { label: "1152x512 · 21:9 fast", width: 1152, height: 512, fast: true },
+    { label: "1536x672 · 21:9 full", width: 1536, height: 672, fast: false },
   ],
   default_canvas: "960x544 · 16:9 fast",
   duration: { min: 2, max: 14, default: 5 },
@@ -85,36 +106,48 @@ export const FALLBACK_CONFIG: StudioConfig = {
       description: "Full quality schedule with conservative Cache-DiT acceleration.",
       recommended: true,
       custom: false,
+      steps: 28,
+      acceleration: "Balanced",
     },
     {
       value: "Turbo 8-step — faster, cleaner",
       description: "Distilled eight-step path with better Turbo consistency.",
       recommended: false,
       custom: false,
+      steps: 8,
+      acceleration: "Exact",
     },
     {
       value: "Turbo 4-step — fastest, more artifacts",
       description: "Maximum speed; expect sharper textures and more motion artifacts.",
       recommended: false,
       custom: false,
+      steps: 4,
+      acceleration: "Exact",
     },
     {
       value: "Exact 28-step — maximum fidelity",
       description: "Dense reference path with approximate caching disabled.",
       recommended: false,
       custom: false,
+      steps: 28,
+      acceleration: "Exact",
     },
     {
       value: "Ultra cache — experimental speed",
       description: "Aggressive forecasting on the full schedule; inspect results carefully.",
       recommended: false,
       custom: false,
+      steps: 28,
+      acceleration: "Ultra Fast",
     },
     {
       value: "Custom — manual controls",
       description: "Expose schedule, cache engine, LoRA source, and strength controls.",
       recommended: false,
       custom: true,
+      steps: 28,
+      acceleration: "Balanced",
     },
   ],
   default_preset: "Balanced — best overall (recommended)",
@@ -134,6 +167,11 @@ export const FALLBACK_CONFIG: StudioConfig = {
       title: "Concert hall",
       prompt: "A cellist playing a slow melody in an empty concert hall",
       canvas: "544x544 · 1:1 fast",
+    },
+    {
+      title: "Coastal cinema",
+      prompt: "Waves crashing against black basalt cliffs at golden hour, gulls calling above the surf",
+      canvas: "960x544 · 16:9 fast",
     },
   ],
 };

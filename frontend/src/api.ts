@@ -1,5 +1,6 @@
 import { Client, handle_file, type StatusMessage } from "@gradio/client";
-import type { GeneratedVideo, GenerationValues, RunProgress, StudioConfig } from "./types";
+import type { Acceleration, GeneratedVideo, GenerationValues, PresetOption, RunProgress, StudioConfig } from "./types";
+import { FALLBACK_CONFIG } from "./types";
 
 type FilePayload = { url?: string; path?: string; name?: string; data?: string };
 
@@ -10,10 +11,25 @@ function getClient() {
   return clientPromise;
 }
 
+/**
+ * `steps` and `acceleration` are what let the studio price each preset before it is chosen. Older deployments of
+ * `/studio-config` do not send them, so fall back to the known values rather than showing every preset the same cost.
+ */
+function withPresetSchedule(preset: PresetOption): PresetOption {
+  if (typeof preset.steps === "number" && preset.acceleration) return preset;
+  const known = FALLBACK_CONFIG.presets.find((item) => item.value === preset.value);
+  return {
+    ...preset,
+    steps: preset.steps ?? known?.steps ?? 28,
+    acceleration: preset.acceleration ?? known?.acceleration ?? ("Balanced" as Acceleration),
+  };
+}
+
 export async function fetchStudioConfig(): Promise<StudioConfig> {
   const response = await fetch("/studio-config");
   if (!response.ok) throw new Error(`Studio configuration failed (${response.status}).`);
-  return response.json() as Promise<StudioConfig>;
+  const config = (await response.json()) as StudioConfig;
+  return { ...config, presets: config.presets.map(withPresetSchedule) };
 }
 
 export async function fetchModelStatus(): Promise<{ ready: boolean; status: string }> {
@@ -46,9 +62,10 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
     const rawFraction = progressItem?.progress ?? (trackedStep ? progressItem.index! / progressItem.length! : null);
     const gpuInitialization = progressItem?.desc === "ZeroGPU init";
     const denoising = trackedStep && !gpuInitialization;
+    const gpuPreflight = !trackedStep && progressItem?.desc?.toLowerCase().includes("denoising") === true;
     let phase: RunProgress["phase"] = denoising
       ? "denoising"
-      : gpuInitialization
+      : gpuInitialization || gpuPreflight
         ? "gpu"
         : progressItem
           ? "conditioning"
@@ -60,6 +77,9 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
     if (!progressItem && previous.phase === "denoising") {
       fraction = 0.9;
       phase = "finalizing";
+    } else if (!progressItem && previous.phase === "gpu") {
+      fraction = Math.max(previous.progress ?? 0, 0.2);
+      phase = "conditioning";
     }
     const exact = fraction != null;
     if (fraction == null && !progressItem && previous.stage === "generating") {
@@ -76,7 +96,11 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
         ? progressItem?.desc || "Denoising video and audio"
         : phase === "finalizing"
           ? "Finalizing video and audio"
-          : progressItem?.desc || previous.label || "Generating video and sound",
+          : phase === "gpu"
+            ? "Preparing the GPU worker"
+            : phase === "conditioning" && !progressItem
+              ? "Conditioning the prompt"
+              : progressItem?.desc || previous.label || "Generating video and sound",
       progress: fraction,
       eta: message.eta,
       index: progressItem?.index ?? undefined,

@@ -745,12 +745,16 @@ def studio_config():
         ],
         "default_canvas": DEFAULT_CANVAS,
         "duration": {"min": MIN_UI_DURATION, "max": MAX_UI_DURATION, "default": 5},
+        # `steps` and `acceleration` are the schedule this preset substitutes. The studio needs them to price each
+        # preset with `get_duration`'s formula before the user picks one, so a 4-step run is visibly cheaper.
         "presets": [
             {
                 "value": value,
                 "description": PRESET_DESCRIPTIONS[value],
                 "recommended": value == DEFAULT_PRESET,
                 "custom": value == CUSTOM_PRESET,
+                "steps": GENERATION_PRESETS.get(value, (28, "Balanced", "None"))[0],
+                "acceleration": GENERATION_PRESETS.get(value, (28, "Balanced", "None"))[1],
             }
             for value in [*GENERATION_PRESETS, CUSTOM_PRESET]
         ],
