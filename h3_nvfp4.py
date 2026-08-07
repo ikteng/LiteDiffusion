@@ -844,7 +844,7 @@ class H3NVFP4Transformer(nn.Module):
         return torch.lerp(
             self._lora_egrid[lower],
             self._lora_egrid[lower + 1],
-            (position - lower).unsqueeze(1),
+            (position - lower).to(self._lora_egrid.dtype).unsqueeze(1),
         )
 
     def begin_request(self, total_steps: int | None = None, profile: str = "balanced") -> None:
@@ -921,7 +921,11 @@ class H3NVFP4Transformer(nn.Module):
         table = self.adaln_t_table.to(timestep.device)
         position = timestep.float().clamp(0.0, 1.0) * (table.shape[0] - 1)
         lower = position.floor().long().clamp(max=table.shape[0] - 2)
-        return torch.lerp(table[lower], table[lower + 1], (position - lower).unsqueeze(1))
+        return torch.lerp(
+            table[lower],
+            table[lower + 1],
+            (position - lower).to(table.dtype).unsqueeze(1),
+        )
 
     def _segments(self, indices: torch.Tensor):
         if self._segment_cache is None:
