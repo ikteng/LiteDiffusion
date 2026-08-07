@@ -37,6 +37,16 @@ EGRID_URL = (
     "h3_silu_temb_grid.safetensors"
 )
 
+GENERATION_PRESETS = {
+    "Balanced — best overall (recommended)": (28, "Balanced", "None"),
+    "Turbo 8-step — faster, cleaner": (8, "Exact", "Turbo · 8 steps"),
+    "Turbo 4-step — fastest, more artifacts": (4, "Exact", "Turbo · 4 steps"),
+    "Exact 28-step — maximum fidelity": (28, "Exact", "None"),
+    "Ultra cache — experimental speed": (28, "Ultra Fast", "None"),
+}
+DEFAULT_PRESET = next(iter(GENERATION_PRESETS))
+CUSTOM_PRESET = "Custom — manual controls"
+
 # Must stay identical to the conditioner's table: the *label* goes over the wire, so a canvas that half does not know
 # is rejected there and surfaces as a failure here.
 CANVASES = {
@@ -443,9 +453,9 @@ def _generate_with_hardware_retry(*args):
 def generate(
     prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42,
     upsample=False, acceleration="Balanced", lora_preset="None", lora_repo="", lora_filename="",
-    lora_strength=1.0, progress=gr.Progress(track_tqdm=True),
+    lora_strength=1.0, generation_preset=CUSTOM_PRESET, progress=gr.Progress(track_tqdm=True),
 ):
-    """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
+    """One request. The appended UI preset leaves older positional API parameters intact."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
@@ -453,6 +463,13 @@ def generate(
     if not prompt or not prompt.strip():
         raise gr.Error("MiniMax-H3 always takes a prompt, keyframes or not.")
     print(f"[prompt] {prompt!r}", flush=True)
+
+    generation_preset = str(generation_preset or CUSTOM_PRESET)
+    if generation_preset != CUSTOM_PRESET:
+        try:
+            steps, acceleration, lora_preset = GENERATION_PRESETS[generation_preset]
+        except KeyError as error:
+            raise gr.Error("Unknown speed and quality preset.") from error
 
     requested_steps = int(steps)
     displayed_steps = requested_steps
@@ -467,7 +484,11 @@ def generate(
     # Few-step distilled trajectories are too short to benefit safely from block reuse. Their speed comes from the
     # LoRA; keep every requested Turbo denoiser evaluation exact.
     run_acceleration = "Exact" if lora_preset.startswith("Turbo") else acceleration
-    acceleration_label = f"{lora_preset}, exact denoiser" if lora_preset.startswith("Turbo") else acceleration
+    acceleration_label = (
+        generation_preset
+        if generation_preset != CUSTOM_PRESET
+        else (f"{lora_preset}, exact denoiser" if lora_preset.startswith("Turbo") else acceleration)
+    )
 
     from PIL import Image, ImageOps
 
@@ -600,29 +621,16 @@ load_models()
 INTRO = """# MiniMax-H3 Ultra Fast
 
 <div align="center">
-  <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ model ]</strong></a> &nbsp;
-  <a href="https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4" target="_blank" rel="noopener"><strong>[ NVFP4 ]</strong></a> &nbsp;
-  <a href="https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3" target="_blank" rel="noopener"><strong>[ Sol-Engine ]</strong></a> &nbsp;
-  <a href="https://github.com/vipshop/cache-dit" target="_blank" rel="noopener"><strong>[ Cache-DiT ]</strong></a> &nbsp;
-  <a href="https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora" target="_blank" rel="noopener"><strong>[ Turbo LoRA ]</strong></a> &nbsp;
-  <a href="https://www.minimax.io/blog/minimax-h3" target="_blank" rel="noopener"><strong>[ blog ]</strong></a> &nbsp;
+  <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ MiniMax-H3 model ]</strong></a> &nbsp;
   <a href="https://huggingface.co/spaces/multimodalart/minimax-h3" target="_blank" rel="noopener"><strong>[ original Space ]</strong></a>
 </div>
 
 **MiniMax-H3 Ultra Fast** generates video and synchronized sound locally on one Blackwell ZeroGPU worker. The default
-**28-step Balanced** mode keeps the scheduler quality setting while reducing repeated transformer work.
+**Balanced** preset is the best place to start. Choose **Turbo 8-step** for a larger speedup with moderate quality
+trade-offs, or **Turbo 4-step** when speed matters most. Add a start frame, an end frame, both, or neither.
 
-**Modes:** Balanced uses Cache-DiT DBCache + TaylorSeer and long-sequence Sol-Attn; Ultra Fast adds bounded
-whole-step forecasting;
-Exact disables reuse and sparse attention but retains the lossless kernel/layout optimizations. No prompt-to-video
-result cache is used. A warm 960×544, 56-frame test measured **35s Exact → 23s Balanced (~1.52×)**.
-
-The optional Turbo LoRA runs its distilled trajectory at **4 or 8 exact steps**. Four steps is fastest; eight is the
-higher-quality Turbo setting. A public H3 LoRA in standard A/B `.safetensors` format can also be loaded by repo/file.
-
-Optimized from the original
-[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space. H/t to **blanchon** for
-pointing me to NVIDIA Sana/Sol-Engine and Cache-DiT.
+The generated video includes synchronized sound. There is no prompt-to-video result cache: every click creates a new
+generation from your prompt, images, and seed.
 
 If you find this Space helpful, please give it a like <3
 """
@@ -667,65 +675,98 @@ caching because a 4/8-step distilled trajectory has too few steps to approximate
 The deployed path is benchmark-driven: concurrent VAE decoding, combined AdaLN banks, PyTorch 2.13 and always-on
 Triton AdaLN kernels were tested but reverted because they were slower, unsupported on ZeroGPU, or too costly at cold
 start. Video and audio VAEs, normalization, embeddings and output heads remain at higher precision.
+
+Sources: [NVFP4 checkpoint](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4) ·
+[NVIDIA Sana/Sol-Engine](https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3) ·
+[Cache-DiT](https://github.com/vipshop/cache-dit) ·
+[Turbo LoRA](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora). Optimized from the original
+[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space. H/t to **blanchon** for
+pointing me to Sana/Sol-Engine and Cache-DiT.
 """
 
 with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
     gr.Markdown(INTRO)
-    with gr.Accordion("Optimization details", open=False):
-        gr.Markdown(OPTIMIZATIONS)
 
     with gr.Row():
-        with gr.Column():
+        with gr.Column(scale=5):
             prompt = gr.Textbox(
-                label="Prompt",
-                lines=3,
+                label="Describe your video",
+                lines=4,
                 value="A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
+                placeholder="Describe the scene, motion, camera, and sounds you want...",
             )
-            upsample = gr.Checkbox(label="Upsample prompt", value=False)
+            generation_preset = gr.Radio(
+                label="Speed & quality",
+                choices=[*GENERATION_PRESETS, CUSTOM_PRESET],
+                value=DEFAULT_PRESET,
+                info="Balanced is recommended. Turbo is much faster but can introduce sharpness, texture, or motion artifacts.",
+            )
             with gr.Row():
-                image = gr.Image(label="First frame (optional)", type="filepath")
-                last_image = gr.Image(label="Last frame (optional)", type="filepath")
-            run = gr.Button("Generate", variant="primary")
+                canvas = gr.Dropdown(label="Size & aspect ratio", choices=list(CANVASES), value=DEFAULT_CANVAS)
+                duration = gr.Slider(
+                    label="Length (seconds)", minimum=MIN_UI_DURATION, maximum=MAX_UI_DURATION, step=1, value=5
+                )
+            with gr.Accordion("Add start / end frames (optional)", open=False):
+                gr.Markdown("Use one image for image-to-video, or both to guide the beginning and ending.")
+                with gr.Row():
+                    image = gr.Image(label="Start frame", type="filepath")
+                    last_image = gr.Image(label="End frame", type="filepath")
+            upsample = gr.Checkbox(
+                label="Enhance my prompt",
+                value=False,
+                info="Adds prompt detail using the separate conditioner Space and may take longer.",
+            )
+            run = gr.Button("Generate video", variant="primary", size="lg")
+
             with gr.Accordion("Advanced options", open=False):
-                canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
-                duration = gr.Slider(label="Duration (s)", minimum=MIN_UI_DURATION, maximum=MAX_UI_DURATION, step=1, value=5)
+                seed = gr.Number(
+                    label="Seed", value=42, precision=0,
+                    info="Reuse the same seed to make comparisons more consistent.",
+                )
+                gr.Markdown(
+                    f"The seed always applies. The engine and LoRA controls below are used only when "
+                    f"**{CUSTOM_PRESET}** is selected above. Regular presets configure them automatically."
+                )
                 acceleration = gr.Radio(
-                    label="Acceleration",
+                    label="Cache mode",
                     choices=["Ultra Fast", "Balanced", "Exact"],
                     value="Balanced",
-                    info="Balanced: Cache-DiT hybrid + Sol-Attn. Ultra Fast: aggressive forecasts. Exact: dense.",
+                    info="Balanced is conservative; Ultra Fast is aggressive; Exact disables approximate caching.",
                 )
-                steps = gr.Slider(label="Scheduler steps", minimum=4, maximum=40, step=1, value=28)
-                seed = gr.Number(label="Seed", value=42, precision=0)
+                steps = gr.Slider(
+                    label="Schedule points", minimum=4, maximum=40, step=1, value=28,
+                    info="28 is the normal quality setting. Lower values can reduce quality unless using Turbo.",
+                )
                 lora_preset = gr.Dropdown(
-                    label="LoRA",
+                    label="LoRA mode",
                     choices=["None", "Turbo · 4 steps", "Turbo · 8 steps", "Custom"],
                     value="None",
                     info="Turbo overrides the step slider and uses exact denoiser calls.",
                 )
-                lora_repo = gr.Textbox(label="Custom LoRA repo", placeholder="owner/repository")
-                lora_filename = gr.Textbox(label="Custom LoRA file", placeholder="adapter.safetensors")
+                lora_repo = gr.Textbox(label="Public Hugging Face LoRA repo", placeholder="owner/repository")
+                lora_filename = gr.Textbox(label="LoRA filename", placeholder="adapter.safetensors")
                 lora_strength = gr.Slider(label="LoRA strength", minimum=-2.0, maximum=2.0, step=0.05, value=1.0)
                 gr.Markdown(
                     "Custom LoRAs must be public H3 A/B safetensors (≤2 GiB); no repository code is executed."
                 )
 
-        with gr.Column():
-            video = gr.Video(label="Video + soundtrack")
+        with gr.Column(scale=6):
+            video = gr.Video(label="Your video", height=520)
             report = gr.Markdown(visible=False)
             # An output, so it can be revealed only for a request that asked for a rewrite.
             with gr.Accordion("Upsampled prompt", open=False, visible=False) as upsampled_panel:
                 upsampled = gr.Textbox(show_label=False, lines=8, interactive=False)
 
     image.upload(_fit_keyframe, [image, canvas], [image, canvas])
+    last_image.upload(_fit_keyframe, [last_image, canvas], [last_image, canvas])
 
     gr.Examples(
         examples=[
-            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", None, None, "1344x768 · 16:9 full"],
-            ["A busy night market, neon signs reflecting in puddles, sizzling street food", None, None, "768x1344 · 9:16 full"],
-            ["A cellist playing a slow melody in an empty concert hall", None, None, "768x768 · 1:1 full"],
-            ["The fox looks around, then trots deeper into the forest", "examples/first.png", None, "1344x768 · 16:9 full"],
-            ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", "1344x768 · 16:9 full"],
+            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", None, None, "960x544 · 16:9 fast"],
+            ["A busy night market, neon signs reflecting in puddles, sizzling street food", None, None, "544x960 · 9:16 fast"],
+            ["A cellist playing a slow melody in an empty concert hall", None, None, "544x544 · 1:1 fast"],
+            ["The fox looks around, then trots deeper into the forest", "examples/first.png", None, "960x544 · 16:9 fast"],
+            ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", "960x544 · 16:9 fast"],
         ],
         inputs=[prompt, image, last_image, canvas],
         outputs=[video, report, upsampled, upsampled_panel],
@@ -738,13 +779,16 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
         generate,
         [
             prompt, image, last_image, canvas, duration, steps, seed, upsample, acceleration,
-            lora_preset, lora_repo, lora_filename, lora_strength,
+            lora_preset, lora_repo, lora_filename, lora_strength, generation_preset,
         ],
         [video, report, upsampled, upsampled_panel],
         api_name="generate",
     )
 
-    gr.Markdown(TECHNICAL_NOTES)
+    with gr.Accordion("Technical details", open=False):
+        gr.Markdown(TECHNICAL_NOTES)
+    with gr.Accordion("Full optimization list", open=False):
+        gr.Markdown(OPTIMIZATIONS)
 
     gr.Markdown(
         '<div style="text-align:center"><a href="https://x.com/realmrfakename" target="_blank" '
