@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 import { Clapperboard, Clock3, Gauge, Hash, ImagePlus, Loader2, Ratio, Sparkles, Zap } from "lucide-react";
+import { Toggle } from "@base-ui/react/toggle";
+import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
+import { FADE, POP } from "../lib/motion";
 import { findCanvas, findPreset, formatBudget, formatClock, presetName, snapFrames, FPS } from "../lib/studio";
 import type { GenerationValues, StudioConfig } from "../types";
 import { Button } from "../ui/Button";
@@ -61,43 +64,56 @@ export function Composer({ config, values, update, onApplyExample, onGenerate, r
             value={keyframes === 0 ? "None" : keyframes === 1 ? "1 image" : "2 images"}
             icon={<ImagePlus className="size-3.5" />}
             active={keyframes > 0}
-            width="sm:w-[22rem]"
+            width="w-[22rem]"
           >
             {() => <FramesPanel values={values} update={update} />}
           </ControlPill>
 
-          <button
-            type="button"
-            aria-pressed={values.upsample}
+          <Toggle
+            pressed={values.upsample}
+            onPressedChange={(pressed) => update("upsample", pressed)}
             title="Rewrites your prompt with a larger remote model before conditioning. Adds a queue hop and about 20 seconds."
-            onClick={() => update("upsample", !values.upsample)}
             className={cx(
               "flex h-9 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[13px] font-medium transition-colors duration-100",
-              values.upsample
-                ? "border-accent/50 bg-accent/12 text-accent"
-                : "border-line bg-surface text-muted hover:border-line-strong hover:bg-raised hover:text-ink",
+              "border-line bg-surface text-muted hover:border-line-strong hover:bg-raised hover:text-ink",
+              "data-pressed:border-accent/50 data-pressed:bg-accent/12 data-pressed:text-accent",
             )}
+            render={<motion.button whileTap={{ scale: 0.97 }} transition={POP} />}
           >
-            <Sparkles className="size-3.5" />
+            {/* The sparkle leans in when the rewrite is on — a state you would otherwise only read off the border. */}
+            <motion.span
+              animate={{ rotate: values.upsample ? 0 : -12, scale: values.upsample ? 1 : 0.92 }}
+              transition={POP}
+              className="grid place-items-center"
+            >
+              <Sparkles className="size-3.5" />
+            </motion.span>
             <span className="hidden sm:inline">Enhance</span>
-          </button>
+          </Toggle>
 
           <div className="min-w-0 flex-1" />
 
-          <span
-            className={cx(
-              "tabular hidden shrink-0 px-1 text-right text-[11px] leading-tight sm:block",
-              blockedReason ? "text-warn" : "text-faint",
-            )}
-          >
-            {blockedReason ?? (
-              <>
-                books ≈{formatBudget(budget)}
-                <br />
-                of GPU
-              </>
-            )}
-          </span>
+          {/* The estimate and the blocked reason occupy the same slot, so they cross-fade rather than swap. */}
+          <div className="tabular hidden shrink-0 px-1 text-right text-[11px] leading-tight sm:grid">
+            <AnimatePresence mode="popLayout" initial={false}>
+              <motion.span
+                key={blockedReason ?? formatBudget(budget)}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={FADE}
+                className={cx("col-start-1 row-start-1", blockedReason ? "text-warn" : "text-faint")}
+              >
+                {blockedReason ?? (
+                  <>
+                    books ≈{formatBudget(budget)}
+                    <br />
+                    of GPU
+                  </>
+                )}
+              </motion.span>
+            </AnimatePresence>
+          </div>
 
           <Button variant="primary" size="lg" disabled={!ready} onClick={onGenerate} className="shrink-0">
             {running ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" fill="currentColor" />}
@@ -112,7 +128,7 @@ export function Composer({ config, values, update, onApplyExample, onGenerate, r
           value={presetName(values.preset)}
           icon={<Gauge className="size-3.5" />}
           active={values.preset !== config.default_preset}
-          width="sm:w-[27rem]"
+          width="w-[27rem]"
         >
           {() => <SpeedPanel config={config} values={values} update={update} />}
         </ControlPill>
@@ -122,7 +138,7 @@ export function Composer({ config, values, update, onApplyExample, onGenerate, r
           value={`${canvas.width}×${canvas.height}`}
           icon={<Ratio className="size-3.5" />}
           active={values.canvas !== config.default_canvas}
-          width="sm:w-[24rem]"
+          width="w-[24rem]"
         >
           {() => <FormatPanel config={config} values={values} update={update} />}
         </ControlPill>
@@ -132,7 +148,7 @@ export function Composer({ config, values, update, onApplyExample, onGenerate, r
           value={formatClock(frames / FPS)}
           icon={<Clock3 className="size-3.5" />}
           active={values.duration !== config.duration.default}
-          width="sm:w-[22rem]"
+          width="w-[22rem]"
         >
           {() => <LengthPanel config={config} values={values} update={update} />}
         </ControlPill>
@@ -142,7 +158,7 @@ export function Composer({ config, values, update, onApplyExample, onGenerate, r
           value={String(values.seed)}
           icon={<Hash className="size-3.5" />}
           align="end"
-          width="sm:w-[21rem]"
+          width="w-[21rem]"
         >
           {() => <SeedPanel values={values} update={update} />}
         </ControlPill>

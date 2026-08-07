@@ -1,5 +1,10 @@
 import { useRef, useState } from "react";
 import { ChevronDown, Dices } from "lucide-react";
+import { Collapsible } from "@base-ui/react/collapsible";
+import { Radio } from "@base-ui/react/radio";
+import { RadioGroup } from "@base-ui/react/radio-group";
+import { AnimatePresence, motion } from "framer-motion";
+import { FADE } from "../lib/motion";
 import {
   estimateGpuSeconds,
   findCanvas,
@@ -83,42 +88,59 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
         onChange={(next) => update("preset", axis[next].value)}
       />
 
-      <div className="rounded-lg bg-sunken px-3 py-2.5">
+      {/* `layout` on the card is what keeps the popover from jolting when a longer description swaps in. */}
+      <motion.div layout transition={FADE} className="overflow-hidden rounded-lg bg-sunken px-3 py-2.5">
         <p className="flex items-baseline gap-2">
-          <span className="text-[13.5px] font-medium text-ink">
-            {manual ? "Manual" : presetName(current.value)}
-          </span>
-          {!manual && current.recommended && (
-            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.06em] text-accent">
-              recommended
-            </span>
-          )}
+          <span className="text-[13.5px] font-medium text-ink">{manual ? "Manual" : presetName(current.value)}</span>
+          <AnimatePresence initial={false}>
+            {!manual && current.recommended && (
+              <motion.span
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                transition={FADE}
+                className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.06em] text-accent"
+              >
+                recommended
+              </motion.span>
+            )}
+          </AnimatePresence>
           <span className="tabular ml-auto shrink-0 text-[12px] text-muted">{budget}</span>
         </p>
         {/* In manual mode the controls themselves are two rows below, so restating them here would only add noise. */}
         {!manual && (
-          <p className="mt-1 text-[12px] leading-[1.5] text-muted">
+          <motion.p
+            key={current.value}
+            initial={{ opacity: 0, y: 3 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={FADE}
+            className="mt-1 text-[12px] leading-[1.5] text-muted"
+          >
             {sentence(presetTagline(current.value))} {current.description}
-          </p>
+          </motion.p>
         )}
         <p className="tabular mt-1.5 text-[11px] text-faint">
           {steps} steps · {manual ? values.acceleration : current.acceleration} cache · books the GPU for {budget}
         </p>
-      </div>
+      </motion.div>
 
       {custom && (
-        <div className="border-t border-line pt-2.5">
-          <button
-            type="button"
-            aria-expanded={advanced}
-            onClick={() => setAdvanced((open) => !open)}
-            className="flex w-full items-center gap-1.5 text-[12px] text-muted transition-colors duration-100 hover:text-ink"
-          >
+        // The height transition is CSS on `--collapsible-panel-height` rather than a JS `height: auto` animation:
+        // Base UI has already measured the panel, and re-measuring it from JS on every frame inside a popover that is
+        // simultaneously being repositioned is exactly how a disclosure ends up stuttering.
+        <Collapsible.Root open={advanced} onOpenChange={setAdvanced} className="border-t border-line pt-2.5">
+          <Collapsible.Trigger className="group flex w-full items-center gap-1.5 text-[12px] text-muted transition-colors duration-100 hover:text-ink">
             Advanced
-            <ChevronDown className={cx("size-3.5 transition-transform duration-150", advanced && "rotate-180")} />
-          </button>
+            <ChevronDown className="size-3.5 transition-transform duration-200 group-data-panel-open:rotate-180" />
+          </Collapsible.Trigger>
 
-          {advanced && (
+          <Collapsible.Panel
+            className={cx(
+              "h-[var(--collapsible-panel-height)] overflow-hidden",
+              "transition-[height] duration-200 ease-out",
+              "data-starting-style:h-0 data-ending-style:h-0",
+            )}
+          >
             <div className="mt-3 flex flex-col gap-3">
               <Switch
                 checked={manual}
@@ -126,10 +148,23 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
                 label="Manual controls"
                 description="Set the schedule, cache engine and LoRA yourself instead of using a preset."
               />
-              {manual && <CustomPresetControls values={values} update={update} />}
+              <AnimatePresence initial={false}>
+                {manual && (
+                  <motion.div
+                    key="manual"
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    transition={FADE}
+                    className="flex flex-col gap-3"
+                  >
+                    <CustomPresetControls values={values} update={update} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
-          )}
-        </div>
+          </Collapsible.Panel>
+        </Collapsible.Root>
       )}
 
       <p className="text-[11px] leading-[1.5] text-faint">
@@ -224,22 +259,27 @@ export function FormatPanel({ config, values, update }: PanelProps) {
   return (
     <div className="flex flex-col gap-3.5">
       <Field label="Aspect ratio" value={activeGroup.ratio}>
-        <div role="radiogroup" aria-label="Aspect ratio" className="flex flex-wrap gap-1.5">
+        <RadioGroup
+          aria-label="Aspect ratio"
+          value={activeGroup.ratio}
+          // Carry the size tier across ratios, so someone on "full" does not silently drop to "fast".
+          onValueChange={(next) => {
+            const group = groups.find((candidate) => candidate.ratio === next);
+            if (!group) return;
+            update("canvas", group.options[Math.min(Math.max(tier, 0), group.options.length - 1)].label);
+          }}
+          className="flex flex-wrap gap-1.5"
+        >
           {groups.map((group) => {
             const selected = group.ratio === activeGroup.ratio;
             const landscape = group.value >= 1;
             return (
-              <button
+              <Radio.Root
                 key={group.ratio}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                // Carry the size tier across ratios, so someone on "full" does not silently drop to "fast".
-                onClick={() =>
-                  update("canvas", group.options[Math.min(Math.max(tier, 0), group.options.length - 1)].label)
-                }
+                value={group.ratio}
                 className={cx(
-                  "flex min-w-[4.25rem] flex-1 flex-col items-center gap-1.5 rounded-lg border px-2 py-2 transition-colors duration-100",
+                  "flex min-w-[4.25rem] flex-1 cursor-pointer flex-col items-center gap-1.5 rounded-lg border px-2 py-2",
+                  "transition-colors duration-100",
                   selected
                     ? "border-accent/50 bg-accent/10 text-ink"
                     : "border-line bg-sunken text-muted hover:border-line-strong hover:text-ink",
@@ -248,7 +288,10 @@ export function FormatPanel({ config, values, update }: PanelProps) {
                 {/* The box has to be square for the percentages below to describe the ratio they claim to. */}
                 <span aria-hidden className="grid size-6 place-items-center">
                   <span
-                    className={cx("block rounded-[3px] border", selected ? "border-accent" : "border-line-strong")}
+                    className={cx(
+                      "block rounded-[3px] border transition-colors duration-100",
+                      selected ? "border-accent" : "border-line-strong",
+                    )}
                     style={
                       landscape
                         ? { width: "100%", height: `${100 / group.value}%` }
@@ -257,10 +300,10 @@ export function FormatPanel({ config, values, update }: PanelProps) {
                   />
                 </span>
                 <span className="tabular text-[11.5px] font-medium">{group.ratio}</span>
-              </button>
+              </Radio.Root>
             );
           })}
-        </div>
+        </RadioGroup>
       </Field>
 
       <Field label="Resolution" value={`${canvas.width} × ${canvas.height}`}>
@@ -312,11 +355,14 @@ export function SeedPanel({ values, update }: Omit<PanelProps, "config">) {
     <div className="flex flex-col gap-3">
       <Field label="Seed" hint="The same seed, prompt and settings reproduce the same clip.">
         <div className="flex gap-2">
+          {/* Deliberately not `type="number"`: a nine-digit seed is never stepped one at a time, and the native
+              spinner would take up a third of the field to offer exactly that. */}
           <TextInput
-            type="number"
             inputMode="numeric"
+            pattern="[0-9]*"
+            aria-label="Seed"
             value={String(values.seed)}
-            onChange={(event) => update("seed", Math.trunc(Number(event.target.value)) || 0)}
+            onChange={(event) => update("seed", Number(event.target.value.replace(/\D/g, "").slice(0, 10)) || 0)}
           />
           <Button variant="outline" onClick={() => update("seed", randomSeed())} className="shrink-0">
             <Dices className="size-4" /> Randomise

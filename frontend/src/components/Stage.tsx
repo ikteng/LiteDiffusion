@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, Copy, Download, RotateCcw, Sparkles, Volume2 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
+import { FADE, SETTLE } from "../lib/motion";
 import { formatEta, parseReport } from "../lib/studio";
 import type { CanvasOption, GeneratedVideo, RunPhase, RunProgress } from "../types";
 import { Button } from "../ui/Button";
@@ -28,13 +30,32 @@ type Props = {
   onDismissError: () => void;
 };
 
+/**
+ * Exactly one of error / running / result is on screen at a time, and the handover is the whole point of the
+ * animation: `mode="wait"` means the progress box is gone before the video appears, so the two never overlap in a
+ * space that is reserving the clip's aspect ratio.
+ */
 export function Stage({ video, progress, error, canvas, onDismissError }: Props) {
   const running = progress.stage === "connecting" || progress.stage === "queued" || progress.stage === "generating";
+  const showing = error ? "error" : running ? "run" : video ? "result" : "none";
 
-  if (error) return <ErrorPanel message={error} onDismiss={onDismissError} />;
-  if (running) return <RunPanel progress={progress} canvas={canvas} />;
-  if (video) return <ResultPanel video={video} canvas={canvas} />;
-  return null;
+  return (
+    <AnimatePresence mode="wait" initial={false}>
+      {showing !== "none" && (
+        <motion.div
+          key={showing}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={SETTLE}
+        >
+          {showing === "error" && <ErrorPanel message={error!} onDismiss={onDismissError} />}
+          {showing === "run" && <RunPanel progress={progress} canvas={canvas} />}
+          {showing === "result" && video && <ResultPanel video={video} canvas={canvas} />}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 }
 
 /**
@@ -63,27 +84,41 @@ function RunPanel({ progress, canvas }: { progress: RunProgress; canvas: CanvasO
   const eta = formatEta(progress.eta);
 
   return (
-    <section aria-label="Generation progress" className="rise flex flex-col gap-3">
+    <section aria-label="Generation progress" className="flex flex-col gap-3">
       <div
         style={stageStyle(canvas)}
         className="mx-auto flex w-full max-w-full flex-col items-center justify-center gap-5 rounded-2xl border border-line bg-sunken px-6"
       >
         <div className="w-full max-w-sm">
+          {/* A finished phase fills left-to-right rather than switching colour, so the row reads as a track being
+              covered — which is what the five phases actually are. */}
           <div className="flex gap-1" aria-hidden>
             {PHASES.map((phase, index) => (
-              <span
-                key={phase.key}
-                className={cx(
-                  "h-1 flex-1 overflow-hidden rounded-full",
-                  index < activeIndex ? "bg-accent" : "bg-line",
-                )}
-              >
+              <span key={phase.key} className="relative h-1 flex-1 overflow-hidden rounded-full bg-line">
+                <motion.span
+                  className="absolute inset-y-0 left-0 rounded-full bg-accent"
+                  initial={false}
+                  animate={{ width: index < activeIndex ? "100%" : "0%" }}
+                  transition={SETTLE}
+                />
                 {index === activeIndex && <span className="sweep block h-full w-1/2 rounded-full bg-accent" />}
               </span>
             ))}
           </div>
-          <p className="mt-3 text-center text-[15px] font-medium text-ink">{active.label}</p>
-          <p className="mt-1 text-center text-[12.5px] leading-[1.5] text-muted">{active.blurb}</p>
+
+          {/* Phase copy is the one thing on screen that changes on its own, so it gets a proper hand-off. */}
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={active.key}
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              transition={FADE}
+            >
+              <p className="mt-3 text-center text-[15px] font-medium text-ink">{active.label}</p>
+              <p className="mt-1 text-center text-[12.5px] leading-[1.5] text-muted">{active.blurb}</p>
+            </motion.div>
+          </AnimatePresence>
         </div>
 
         <div className="w-full max-w-sm">
@@ -113,7 +148,7 @@ function ResultPanel({ video, canvas }: { video: GeneratedVideo; canvas: CanvasO
   }, [video.url]);
 
   return (
-    <section aria-label="Generated video" className="rise flex flex-col gap-3">
+    <section aria-label="Generated video" className="flex flex-col gap-3">
       <video
         ref={videoRef}
         src={video.url}
@@ -143,11 +178,19 @@ function ResultPanel({ video, canvas }: { video: GeneratedVideo; canvas: CanvasO
         </Button>
       </div>
 
-      {showPrompt && video.refinedPrompt && (
-        <p className="rise rounded-xl border border-line bg-surface p-3 text-[12.5px] leading-[1.6] text-muted">
-          {video.refinedPrompt}
-        </p>
-      )}
+      <AnimatePresence initial={false}>
+        {showPrompt && video.refinedPrompt && (
+          <motion.p
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={FADE}
+            className="overflow-hidden rounded-xl border border-line bg-surface text-[12.5px] leading-[1.6] text-muted"
+          >
+            <span className="block p-3">{video.refinedPrompt}</span>
+          </motion.p>
+        )}
+      </AnimatePresence>
 
       {facts.length > 0 && (
         <dl className="flex flex-wrap gap-1.5" aria-label="Generation details">
@@ -175,7 +218,20 @@ function CopyButton({ text }: { text: string }) {
         window.setTimeout(() => setCopied(false), 1600);
       }}
     >
-      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+      {/* The tick swaps in place of the clipboard rather than next to it, so the row does not reflow on every copy. */}
+      <span className="grid size-3.5 place-items-center">
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.span
+            key={copied ? "copied" : "idle"}
+            initial={{ opacity: 0, scale: 0.6 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.6 }}
+            transition={FADE}
+          >
+            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          </motion.span>
+        </AnimatePresence>
+      </span>
       {copied ? "Copied" : "Details"}
     </Button>
   );
@@ -190,10 +246,7 @@ function downloadVideo(url: string) {
 
 function ErrorPanel({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
-    <section
-      role="alert"
-      className="rise flex items-start gap-3 rounded-2xl border border-bad/40 bg-bad/8 px-4 py-3.5"
-    >
+    <section role="alert" className="flex items-start gap-3 rounded-2xl border border-bad/40 bg-bad/8 px-4 py-3.5">
       <AlertTriangle className="mt-0.5 size-4 shrink-0 text-bad" />
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-medium text-ink">That run did not finish</p>

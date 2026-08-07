@@ -1,5 +1,8 @@
 import { ImagePlus, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { cx } from "../lib/cx";
+import { FADE, POP } from "../lib/motion";
 
 type Props = {
   label: string;
@@ -23,7 +26,13 @@ export function KeyframeSlot({ label, hint, file, onChange }: Props) {
   }, [file]);
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-dashed border-line bg-sunken">
+    <div
+      className={cx(
+        "relative h-28 overflow-hidden rounded-xl bg-sunken transition-colors duration-150",
+        // Solid once it holds an image, dashed while it is still an invitation to drop one in.
+        preview ? "border border-line" : "border border-dashed border-line",
+      )}
+    >
       <input
         id={inputId}
         type="file"
@@ -31,31 +40,47 @@ export function KeyframeSlot({ label, hint, file, onChange }: Props) {
         className="sr-only"
         onChange={(event) => onChange(event.target.files?.[0] ?? null)}
       />
-      {preview ? (
-        <>
-          <img src={preview} alt={`${label} preview`} className="h-28 w-full object-cover" />
-          <button
-            type="button"
-            onClick={() => onChange(null)}
-            aria-label={`Remove ${label}`}
-            className="absolute right-1.5 top-1.5 grid size-7 place-items-center rounded-lg bg-black/70 text-ink backdrop-blur hover:bg-black/85"
+      <AnimatePresence initial={false} mode="popLayout">
+        {preview ? (
+          <motion.div
+            key="preview"
+            initial={{ opacity: 0, scale: 1.04 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0 }}
+            transition={FADE}
+            className="absolute inset-0"
           >
-            <X className="size-3.5" />
-          </button>
-          <span className="absolute bottom-1.5 left-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium backdrop-blur">
-            {label}
-          </span>
-        </>
-      ) : (
-        <label
-          htmlFor={inputId}
-          className="flex h-28 cursor-pointer flex-col items-center justify-center gap-1 px-2 text-center hover:bg-raised/50"
-        >
-          <ImagePlus className="size-4 text-faint" />
-          <span className="text-[12px] font-medium text-ink">{label}</span>
-          <span className="text-[10.5px] text-faint">{hint}</span>
-        </label>
-      )}
+            <img src={preview} alt={`${label} preview`} className="size-full object-cover" />
+            <motion.button
+              type="button"
+              onClick={() => onChange(null)}
+              aria-label={`Remove ${label}`}
+              whileTap={{ scale: 0.92 }}
+              transition={POP}
+              className="absolute right-1.5 top-1.5 grid size-7 place-items-center rounded-lg bg-black/70 text-ink backdrop-blur hover:bg-black/85"
+            >
+              <X className="size-3.5" />
+            </motion.button>
+            <span className="absolute bottom-1.5 left-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium backdrop-blur">
+              {label}
+            </span>
+          </motion.div>
+        ) : (
+          <motion.label
+            key="empty"
+            htmlFor={inputId}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={FADE}
+            className="absolute inset-0 flex cursor-pointer flex-col items-center justify-center gap-1 px-2 text-center transition-colors duration-100 hover:bg-raised/50"
+          >
+            <ImagePlus className="size-4 text-faint" />
+            <span className="text-[12px] font-medium text-ink">{label}</span>
+            <span className="text-[10.5px] text-faint">{hint}</span>
+          </motion.label>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

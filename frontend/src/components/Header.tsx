@@ -25,7 +25,7 @@ export function Header({ model, onOpenUsage, onOpenAbout }: Props) {
         <Popover
           panelLabel="Engine status"
           align="end"
-          width="sm:w-[22rem]"
+          width="w-[22rem]"
           triggerClassName="rounded-lg"
           trigger={() => (
             <span className="flex h-9 items-center gap-2 rounded-lg px-2.5 text-[12.5px] text-muted hover:bg-raised hover:text-ink">

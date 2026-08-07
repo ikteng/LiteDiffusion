@@ -1,5 +1,9 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useId, type ReactNode } from "react";
+import { Radio } from "@base-ui/react/radio";
+import { RadioGroup } from "@base-ui/react/radio-group";
+import { motion } from "framer-motion";
 import { cx } from "../lib/cx";
+import { POP } from "../lib/motion";
 
 export type SegmentedOption<T extends string> = {
   value: T;
@@ -19,35 +23,23 @@ type Props<T extends string> = {
 };
 
 /**
- * A radiogroup with roving tabindex and arrow-key movement.
+ * A radio group drawn as one connected control.
  *
  * Used wherever a choice is small and worth showing in full — resolution within an aspect ratio, cache engine, LoRA
  * schedule. Anything longer than about five options belongs in a list instead.
+ *
+ * The selected background is a single shared element that Framer Motion moves between the segments (`layoutId`), so
+ * picking a neighbour reads as the highlight sliding across rather than one box blinking off and another on. Because
+ * it is the *same* element, it never double-renders during the handover.
  */
 export function Segmented<T extends string>({ ariaLabel, value, options, onChange, vertical, className }: Props<T>) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    const forward = vertical ? "ArrowDown" : "ArrowRight";
-    const backward = vertical ? "ArrowUp" : "ArrowLeft";
-    if (event.key !== forward && event.key !== backward) return;
-    event.preventDefault();
-    const selectable = options.filter((option) => !option.disabled);
-    const index = selectable.findIndex((option) => option.value === value);
-    const step = event.key === forward ? 1 : -1;
-    const next = selectable[(index + step + selectable.length) % selectable.length];
-    if (!next) return;
-    onChange(next.value);
-    const buttons = containerRef.current?.querySelectorAll<HTMLButtonElement>("[role='radio']");
-    buttons?.[options.indexOf(next)]?.focus();
-  }
+  const highlight = useId();
 
   return (
-    <div
-      ref={containerRef}
-      role="radiogroup"
+    <RadioGroup
       aria-label={ariaLabel}
-      onKeyDown={onKeyDown}
+      value={value}
+      onValueChange={(next) => onChange(next as T)}
       className={cx(
         "flex gap-1 rounded-xl border border-line bg-sunken p-1",
         vertical ? "flex-col" : "flex-row",
@@ -57,29 +49,36 @@ export function Segmented<T extends string>({ ariaLabel, value, options, onChang
       {options.map((option) => {
         const selected = option.value === value;
         return (
-          <button
+          <Radio.Root
             key={option.value}
-            type="button"
-            role="radio"
-            aria-checked={selected}
+            value={option.value}
             disabled={option.disabled}
-            tabIndex={selected ? 0 : -1}
-            onClick={() => onChange(option.value)}
             className={cx(
-              "flex min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-2 py-1.5 transition-colors duration-100",
-              "disabled:cursor-not-allowed disabled:opacity-40",
-              selected ? "bg-raised text-ink shadow-sm" : "text-muted hover:bg-raised/60 hover:text-ink",
+              "relative flex min-w-0 flex-1 cursor-pointer flex-col items-center justify-center rounded-lg px-2 py-1.5",
+              "transition-colors duration-100 data-disabled:cursor-not-allowed data-disabled:opacity-40",
+              selected ? "text-ink" : "text-muted hover:bg-raised/60 hover:text-ink",
             )}
           >
-            <span className="truncate text-[13px] font-medium leading-5">{option.label}</span>
+            {selected && (
+              <motion.span
+                aria-hidden
+                layoutId={highlight}
+                transition={POP}
+                className="absolute inset-0 rounded-lg bg-raised shadow-sm"
+              />
+            )}
+            {/* The label sits above the highlight, which is the only reason these two need a stacking context. */}
+            <span className="relative truncate text-[13px] font-medium leading-5">{option.label}</span>
             {option.hint && (
-              <span className={cx("tabular truncate text-[10px] leading-4", selected ? "text-muted" : "text-faint")}>
+              <span
+                className={cx("tabular relative truncate text-[10px] leading-4", selected ? "text-muted" : "text-faint")}
+              >
                 {option.hint}
               </span>
             )}
-          </button>
+          </Radio.Root>
         );
       })}
-    </div>
+    </RadioGroup>
   );
 }

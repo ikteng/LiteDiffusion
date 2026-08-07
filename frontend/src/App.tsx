@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { fetchModelStatus, fetchStudioConfig, runGeneration } from "./api";
 import { AboutSheet } from "./components/AboutSheet";
 import { Composer } from "./components/Composer";
@@ -6,6 +7,7 @@ import { Header } from "./components/Header";
 import { Stage } from "./components/Stage";
 import { UsageSheet } from "./components/UsageSheet";
 import { cx } from "./lib/cx";
+import { SETTLE } from "./lib/motion";
 import { findCanvas } from "./lib/studio";
 import type { GeneratedVideo, GenerationValues, ModelStatus, RunProgress, StudioConfig } from "./types";
 import { FALLBACK_CONFIG } from "./types";
@@ -120,26 +122,42 @@ export default function App() {
             hasStage ? "justify-start pt-6" : "justify-center pt-0",
           )}
         >
-          {!hasStage && (
-            <div className="text-center">
-              <h1 className="text-balance text-[26px] font-semibold leading-tight tracking-[-0.03em] sm:text-[32px]">
-                Make a scene from a sentence.
-              </h1>
-              <p className="mt-2 text-[13.5px] text-muted">
-                Video and its soundtrack, generated together in one pass.
-              </p>
-            </div>
-          )}
+          {/* The hero is the page until there is something better to look at, then it gets out of the way and the
+              composer takes its place. `layout` on the composer is what makes that a move rather than a jump. */}
+          <AnimatePresence initial={false}>
+            {!hasStage && (
+              <motion.div
+                key="hero"
+                layout
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -12, height: 0, marginBottom: -20 }}
+                transition={SETTLE}
+                className="overflow-hidden text-center"
+              >
+                <h1 className="text-balance text-[26px] font-semibold leading-tight tracking-[-0.03em] sm:text-[32px]">
+                  Make a scene from a sentence.
+                </h1>
+                <p className="mt-2 text-[13.5px] text-muted">
+                  Video and its soundtrack, generated together in one pass.
+                </p>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
-          <Composer
-            config={config}
-            values={values}
-            update={update}
-            onApplyExample={applyExample}
-            onGenerate={generate}
-            running={running}
-            blockedReason={blockedReason}
-          />
+          {/* `layout="position"` and not plain `layout`: the composer must slide up when the hero leaves, but the
+              textarea grows as you type, and springing its *height* would leave the caret trailing the cursor. */}
+          <motion.div layout="position" transition={SETTLE}>
+            <Composer
+              config={config}
+              values={values}
+              update={update}
+              onApplyExample={applyExample}
+              onGenerate={generate}
+              running={running}
+              blockedReason={blockedReason}
+            />
+          </motion.div>
 
           <div ref={stageRef}>
             <Stage

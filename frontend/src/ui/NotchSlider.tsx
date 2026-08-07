@@ -1,9 +1,11 @@
+import { Slider } from "@base-ui/react/slider";
 import { cx } from "../lib/cx";
 
+const TRACK = 30;
 const THUMB = 24;
 
 type Props = {
-  /** One label per stop, used for the value announcement and the tooltip on each dot. */
+  /** One label per stop, used for the value announcement and to name the position. */
   stops: string[];
   index: number;
   onChange: (index: number) => void;
@@ -22,51 +24,73 @@ type Props = {
  *
  * The dots mark every stop the thumb can land on. The active one is omitted: the thumb is already sitting there, and a
  * dot showing through the middle of it reads as a second, wrong marker.
+ *
+ * Motion here is CSS rather than Framer Motion, and that is deliberate. Base UI positions the thumb by writing
+ * `inset-inline-start` and sizes the fill by writing `width`; a JS animation loop would be overwriting those same
+ * values sixty times a second while you drag. A transition that switches itself off under `data-dragging` gives the
+ * better behaviour anyway — the thumb glides when you step it with a key or click a dot, and pins to your finger when
+ * you actually drag it.
  */
 export function NotchSlider({ stops, index, onChange, ariaLabel, minLabel, maxLabel, disabled }: Props) {
   const last = Math.max(1, stops.length - 1);
-  const fraction = Math.min(Math.max(index, 0), last) / last;
-  // A native thumb's centre travels from `THUMB/2` to `width - THUMB/2`, so a plain percentage would drift at the ends.
-  const at = (value: number) => `calc(${THUMB / 2}px + (100% - ${THUMB}px) * ${value})`;
+  const value = Math.min(Math.max(index, 0), last);
+  // `thumbAlignment="edge"` puts the thumb centre at `THUMB/2 … width - THUMB/2`, so the dots have to use the same
+  // inset travel or they would drift away from the thumb at the ends.
+  const at = (stop: number) => `calc(${THUMB / 2}px + (100% - ${THUMB}px) * ${stop / last})`;
 
   return (
-    <div className={cx("select-none", disabled && "opacity-45")}>
+    <Slider.Root
+      className={cx("group block select-none", disabled && "opacity-45")}
+      min={0}
+      max={last}
+      step={1}
+      value={value}
+      disabled={disabled}
+      thumbAlignment="edge"
+      onValueChange={(next) => onChange(Array.isArray(next) ? next[0] : next)}
+    >
       <div className="mb-1.5 flex items-baseline justify-between text-[11.5px] text-muted">
         <span>{minLabel}</span>
         <span>{maxLabel}</span>
       </div>
 
-      <div className="relative h-[30px] w-full rounded-full bg-raised">
-        <input
-          type="range"
-          className="notch absolute inset-0"
-          aria-label={ariaLabel}
-          aria-valuetext={stops[index] ?? ""}
-          min={0}
-          max={last}
-          step={1}
-          value={Math.min(Math.max(index, 0), last)}
-          disabled={disabled}
-          onChange={(event) => onChange(Number(event.target.value))}
-          style={{ ["--fill" as string]: at(fraction) }}
-        />
+      <Slider.Control
+        className="relative flex w-full touch-none items-center rounded-full bg-raised"
+        style={{ height: TRACK }}
+      >
+        <Slider.Track className="h-full w-full rounded-full">
+          <Slider.Indicator className="rounded-full bg-accent transition-[width] duration-200 ease-out group-data-dragging:duration-0" />
 
-        {/* After the input, so the dots sit on top of the accent fill rather than under it. */}
-        <div aria-hidden className="pointer-events-none absolute inset-0">
-          {stops.map((stop, stopIndex) =>
-            stopIndex === index ? null : (
-              <span
-                key={stop}
-                style={{ left: at(stopIndex / last) }}
-                className={cx(
-                  "absolute top-1/2 size-[5px] -translate-x-1/2 -translate-y-1/2 rounded-full",
-                  stopIndex < index ? "bg-accent-ink/45" : "bg-line-strong",
-                )}
-              />
-            ),
-          )}
-        </div>
-      </div>
-    </div>
+          {/* After the indicator, so the dots sit on top of the accent fill rather than under it. */}
+          <div aria-hidden className="pointer-events-none absolute inset-0">
+            {stops.map((stop, stopIndex) =>
+              stopIndex === value ? null : (
+                <span
+                  key={stop}
+                  style={{ left: at(stopIndex) }}
+                  className={cx(
+                    "absolute top-1/2 size-[5px] -translate-x-1/2 -translate-y-1/2 rounded-full",
+                    stopIndex < value ? "bg-accent-ink/45" : "bg-line-strong",
+                  )}
+                />
+              ),
+            )}
+          </div>
+
+          <Slider.Thumb
+            style={{ width: THUMB, height: THUMB }}
+            getAriaLabel={() => ariaLabel}
+            getAriaValueText={(_formatted, current) => stops[current] ?? String(current)}
+            className={cx(
+              "rounded-full bg-ink shadow-[0_1px_4px_rgb(0_0_0/0.55)]",
+              // Base UI writes `translate` on the thumb, and Tailwind's `scale-*` is the separate `scale` property,
+              // so the press feedback and the positioning never overwrite each other.
+              "[transition:inset-inline-start_200ms_ease-out,scale_120ms_ease-out]",
+              "group-data-dragging:scale-[1.06] group-data-dragging:[transition:scale_120ms_ease-out]",
+            )}
+          />
+        </Slider.Track>
+      </Slider.Control>
+    </Slider.Root>
   );
 }
