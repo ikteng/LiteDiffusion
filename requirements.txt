@@ -14,7 +14,7 @@ transformers==5.8.0
 accelerate==1.14.0
 # diffusers pins <2.
 huggingface-hub==1.24.0
-gradio==6.20.0
+gradio[mcp]==6.20.0
 spaces==0.51.1
 # Blackwell-native NVFP4 GEMMs and the fused Q/K RMSNorm + split-half RoPE kernel used by h3_nvfp4.py.
 # CUDA 13 is mandatory: older builds emulate this path and are slower than BF16.

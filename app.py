@@ -15,6 +15,10 @@ from functools import cache
 # startup rather than on GPU time.
 import spaces
 import gradio as gr
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from gradio import Request, Server
+from gradio.data_classes import FileData
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "MiniMaxAI/MiniMax-H3")
 CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
@@ -27,6 +31,8 @@ PLACEMENT = os.environ.get("H3_PLACEMENT", "lazy" if ENGINE == "nvfp4" else "pac
 # cuDNN's fused attention is 10-20% faster than the SDPA default on this pool and needs nothing installed.
 ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
 GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
+OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "h3-outputs")
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 TURBO_LORA_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
 TURBO_LORA_FILE = "minimax_h3_turbo_4step_ema_ckpt850.safetensors"
 LORA_MAX_BYTES = 2 * 1024**3
@@ -248,13 +254,22 @@ def conditioner():
     return Client(CONDITIONER_SPACE)
 
 
-def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False):
+def conditioner_client(ip_token: str | None):
+    """Create a caller-attributed client in Server mode; fall back to the cached anonymous client when unavailable."""
+    if not ip_token:
+        return conditioner()
+    from gradio_client import Client
+
+    return Client(CONDITIONER_SPACE, headers={"x-ip-token": ip_token})
+
+
+def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False, ip_token=None):
     """`/encode` on the conditioner Space: a safetensors file holding `prompt_embeds` + `text_token_tags`, with the
     resolved `height` / `width` / `num_frames` in its metadata, plus the plan. `canvas` is the label."""
     from gradio_client import handle_file
     from safetensors import safe_open
 
-    path, plan = conditioner().predict(
+    path, plan = conditioner_client(ip_token).predict(
         prompt=prompt,
         image_path=handle_file(image_path) if image_path else None,
         last_image_path=handle_file(last_image_path) if last_image_path else None,
@@ -310,15 +325,15 @@ def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, 
     else:
         repo_id, filename = str(repo_id or "").strip(), str(filename or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_id):
-        raise gr.Error("Custom LoRA repo must look like `owner/repository`.")
+        raise ValueError("Custom LoRA repo must look like `owner/repository`.")
     if not filename.endswith(".safetensors") or filename.startswith(("/", ".")) or ".." in filename.split("/"):
-        raise gr.Error("Custom LoRA must be a safe `.safetensors` filename inside that repository.")
+        raise ValueError("Custom LoRA must be a safe `.safetensors` filename inside that repository.")
 
     from huggingface_hub import get_hf_file_metadata, hf_hub_download, hf_hub_url
 
     metadata = get_hf_file_metadata(hf_hub_url(repo_id, filename), token=False)
     if metadata.size is None or metadata.size > LORA_MAX_BYTES:
-        raise gr.Error("LoRA file is missing a declared size or exceeds the 2 GiB safety limit.")
+        raise ValueError("LoRA file is missing a declared size or exceeds the 2 GiB safety limit.")
     # Keep arbitrary public adapters in a bounded temp cache instead of letting user-selected repos fill Space disk.
     root = os.path.join(tempfile.gettempdir(), "h3-lora-downloads")
     cache_key = hashlib.sha256(f"{repo_id}\0{filename}".encode()).hexdigest()[:20]
@@ -453,15 +468,15 @@ def _generate_with_hardware_retry(*args):
 def generate(
     prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42,
     upsample=False, acceleration="Balanced", lora_preset="None", lora_repo="", lora_filename="",
-    lora_strength=1.0, generation_preset=CUSTOM_PRESET, progress=gr.Progress(track_tqdm=True),
+    lora_strength=1.0, generation_preset=CUSTOM_PRESET, ip_token=None, progress=gr.Progress(track_tqdm=True),
 ):
     """One request. The appended UI preset leaves older positional API parameters intact."""
     if LOAD_ERROR:
-        raise gr.Error(LOAD_ERROR)
+        raise RuntimeError(LOAD_ERROR)
     if PIPE is None:
-        raise gr.Error("The denoiser is still loading.")
+        raise RuntimeError("The denoiser is still loading.")
     if not prompt or not prompt.strip():
-        raise gr.Error("MiniMax-H3 always takes a prompt, keyframes or not.")
+        raise ValueError("MiniMax-H3 always takes a prompt, keyframes or not.")
     print(f"[prompt] {prompt!r}", flush=True)
 
     generation_preset = str(generation_preset or CUSTOM_PRESET)
@@ -469,7 +484,20 @@ def generate(
         try:
             steps, acceleration, lora_preset = GENERATION_PRESETS[generation_preset]
         except KeyError as error:
-            raise gr.Error("Unknown speed and quality preset.") from error
+            raise ValueError("Unknown speed and quality preset.") from error
+
+    def input_path(value):
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value.get("path")
+        return getattr(value, "path", value)
+
+    image_path, last_image_path = input_path(image_path), input_path(last_image_path)
+    if image_path:
+        image_path, canvas = _fit_keyframe(image_path, canvas)
+    if last_image_path:
+        last_image_path, canvas = _fit_keyframe(last_image_path, canvas)
 
     requested_steps = int(steps)
     displayed_steps = requested_steps
@@ -519,7 +547,7 @@ def generate(
         )
         conditioned = time.time()
         prompt_embeds, text_token_tags, metadata, plan = encode_remote(
-            prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample
+            prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample, ip_token=ip_token
         )
         condition_seconds = time.time() - conditioned
         height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
@@ -558,9 +586,8 @@ def generate(
         num_text_tokens = local_num_text_tokens
     denoise_seconds = generate_seconds - (local_condition_seconds or 0.0)
 
-    directory = os.path.join(tempfile.gettempdir(), "h3-outputs")
-    os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, f"h3-{int(time.time() * 1000)}.mp4")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(OUTPUT_DIR, f"h3-{int(time.time() * 1000)}.mp4")
     encode_video(frames, fps=FPS, output_path=path, audio=audio, audio_sample_rate=sampling_rate)
 
     report = (
@@ -576,14 +603,14 @@ def generate(
         f"seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
-    return path, report, refined, gr.update(visible=bool(refined))
+    return FileData(path=path), report, refined
 
 
 def _fit_keyframe(image_path, current_canvas):
     """Cover-crop an uploaded keyframe to the closest supported aspect ratio and select that ratio's smallest
     (fastest) canvas, unless the user already picked a matching ratio."""
     if not image_path:
-        return gr.update(), gr.update()
+        return None, current_canvas
     from PIL import Image as _Image
 
     img = _Image.open(image_path)
@@ -603,7 +630,7 @@ def _fit_keyframe(image_path, current_canvas):
 
     target = w / h
     if abs(img.width / img.height - target) <= 1e-3:
-        return gr.update(), gr.update(value=label)
+        return image_path, label
     if img.width / img.height > target:
         new_w = int(img.height * target)
         left = (img.width - new_w) // 2
@@ -613,189 +640,121 @@ def _fit_keyframe(image_path, current_canvas):
         top = (img.height - new_h) // 2
         img = img.crop((0, top, img.width, top + new_h))
     img.save(image_path)
-    return gr.update(value=image_path), gr.update(value=label)
+    return image_path, label
+
+
+PRESET_DESCRIPTIONS = {
+    "Balanced — best overall (recommended)": "Full quality schedule with conservative Cache-DiT acceleration.",
+    "Turbo 8-step — faster, cleaner": "Distilled eight-step path with better Turbo consistency.",
+    "Turbo 4-step — fastest, more artifacts": "Maximum speed; expect sharper textures and more motion artifacts.",
+    "Exact 28-step — maximum fidelity": "Dense reference path with approximate caching disabled.",
+    "Ultra cache — experimental speed": "Aggressive forecasting on the full schedule; inspect results carefully.",
+    CUSTOM_PRESET: "Expose schedule, cache engine, LoRA source, and strength controls.",
+}
+
+EXAMPLES = [
+    {
+        "title": "Snow fox",
+        "prompt": "A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
+        "canvas": "960x544 · 16:9 fast",
+    },
+    {
+        "title": "Night market",
+        "prompt": "A busy night market, neon signs reflecting in puddles, sizzling street food",
+        "canvas": "544x960 · 9:16 fast",
+    },
+    {
+        "title": "Concert hall",
+        "prompt": "A cellist playing a slow melody in an empty concert hall",
+        "canvas": "544x544 · 1:1 fast",
+    },
+    {
+        "title": "Coastal cinema",
+        "prompt": "Waves crashing against black basalt cliffs at golden hour, gulls calling above the surf",
+        "canvas": "960x544 · 16:9 fast",
+    },
+]
+
+
+app = Server(title="MiniMax-H3 Ultra Fast")
+app.mount("/studio-assets", StaticFiles(directory=FRONTEND_DIR), name="studio-assets")
+
+
+@app.mcp.tool(name="generate_video")
+@app.api(name="generate")
+def generate_api(
+    prompt: str,
+    image_path: FileData | None = None,
+    last_image_path: FileData | None = None,
+    canvas: str = DEFAULT_CANVAS,
+    duration: float = 5,
+    steps: int = 28,
+    seed: float = 42,
+    upsample: bool = False,
+    acceleration: str = "Balanced",
+    lora_preset: str = "None",
+    lora_repo: str = "",
+    lora_filename: str = "",
+    lora_strength: float = 1.0,
+    generation_preset: str = DEFAULT_PRESET,
+    request: Request = None,
+) -> tuple[FileData, str, str]:
+    """Queued generation endpoint used by both the React studio and ordinary gradio_client callers."""
+    ip_token = request.headers.get("x-ip-token") if request is not None else None
+    return generate(
+        prompt,
+        image_path,
+        last_image_path,
+        canvas,
+        duration,
+        steps,
+        seed,
+        upsample,
+        acceleration,
+        lora_preset,
+        lora_repo,
+        lora_filename,
+        lora_strength,
+        generation_preset,
+        ip_token=ip_token,
+    )
+
+
+@app.get("/status")
+def studio_status():
+    return {"ready": PIPE is not None and LOAD_ERROR is None, "status": status()}
+
+
+@app.get("/studio-config")
+def studio_config():
+    return {
+        "canvases": [
+            {"label": label, "height": height, "width": width, "fast": "fast" in label}
+            for label, (height, width) in CANVASES.items()
+        ],
+        "default_canvas": DEFAULT_CANVAS,
+        "duration": {"min": MIN_UI_DURATION, "max": MAX_UI_DURATION, "default": 5},
+        "presets": [
+            {
+                "value": value,
+                "description": PRESET_DESCRIPTIONS[value],
+                "recommended": value == DEFAULT_PRESET,
+                "custom": value == CUSTOM_PRESET,
+            }
+            for value in [*GENERATION_PRESETS, CUSTOM_PRESET]
+        ],
+        "default_preset": DEFAULT_PRESET,
+        "custom_preset": CUSTOM_PRESET,
+        "examples": EXAMPLES,
+    }
+
+
+@app.get("/", response_class=FileResponse)
+def frontend():
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
 load_models()
 
-INTRO = """# MiniMax-H3 Ultra Fast
-
-<div align="center">
-  <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ MiniMax-H3 model ]</strong></a> &nbsp;
-  <a href="https://huggingface.co/spaces/multimodalart/minimax-h3" target="_blank" rel="noopener"><strong>[ original Space ]</strong></a>
-</div>
-
-**MiniMax-H3 Ultra Fast** generates video and synchronized sound locally on one Blackwell ZeroGPU worker. The default
-**Balanced** preset is the best place to start. Choose **Turbo 8-step** for a larger speedup with moderate quality
-trade-offs, or **Turbo 4-step** when speed matters most. Add a start frame, an end frame, both, or neither.
-
-The generated video includes synchronized sound. There is no prompt-to-video result cache: every click creates a new
-generation from your prompt, images, and seed.
-
-If you find this Space helpful, please give it a like <3
-"""
-
-OPTIMIZATIONS = """| Active optimization | What it does |
-|---|---|
-| Pruned NVFP4 | 12.5 GB / 20.1B effective transformer instead of 61.7 GiB / 33.1B BF16; native CUDA 13 FP4 GEMMs. |
-| Local conditioner | Truncated 50-layer Qwen3-VL NVFP4-AWQ; removes the normal remote encode and second GPU queue. |
-| GPU residency | Transformer, conditioner and both full-precision VAEs stay resident; no layerwise CPU offload. |
-| Fused blocks | Fused QKV, Q/K RMSNorm + partial RoPE, fused gate/up MLP layout, and in-place SiLU/gating. |
-| Pruned AdaLN | Replaces 13.04B projection parameters with a 1,025-point curve; one conversion per block. |
-| Cache-DiT hybrid | F1B0 DBCache probes block 1, reuses blocks 2–50 at threshold `0.08`, and TaylorSeer forecasts the cached residual. |
-| Lean cache probe | 1/8-row DBCache signal removes a full packed-activation clone/reduction; at most two consecutive hits limit drift. |
-| Optional LoRA | Runtime BF16 low-rank branches preserve updates over the NVFP4 base; Turbo gets exact dual-schedule 4/8-step sampling. |
-| Sol-Attn | Long target-video sequences use NVIDIA's sparse Triton kernel; prefix/audio rows remain exact. |
-| Quality guards | Sol-Attn waits 10 steps; Cache-DiT keeps 3 warmup + 2 tail steps dense and caps consecutive reuse at 2. |
-| Less output work | Final norm and heads process only retained generated video/audio rows. |
-| Request-local caches | Text refinement, RoPE, segment metadata and static keyframe projections run once per request. |
-| Less memory traffic | No redundant packed-buffer zero-fill, CPU-cached segment row IDs, hoisted hot dispatch lookups. |
-| Reliability | Retries transient ZeroGPU ECC/CUDA worker failures automatically. |
-"""
-
-CSS = """
-.main.fillable {max-width: 1250px !important}
-.dark .gradio-container { color: var(--body-text-color); }
-"""
-
-TECHNICAL_NOTES = """### How the speedups compose
-
-NVFP4 and AdaLN pruning make the entire inference stack fit on one worker, eliminating remote conditioning and
-per-layer transfers. Fused layouts reduce launches and activation traffic inside every exact block evaluation.
-Cache-DiT DBCache then removes redundant block-stack evaluations without lowering the requested 28 scheduler steps;
-its first-order TaylorSeer forecast tracks the cached residual instead of freezing it. The custom integration also
-probes only strided rows before block 1, avoiding an otherwise enormous activation clone and full-tensor reduction.
-Sol-Attn is enabled only above 24,576 packed tokens where quadratic attention can repay its routing overhead.
-
-LoRAs run as separate BF16 activation branches, so they are not rounded away by an NVFP4 merge. LarryVrh's Turbo
-LoRA additionally re-injects its full-width timestep update through the author's pinned interpolation grid; the
-existing H3 pipeline already maintains separate video and audio flow schedules. Turbo requests intentionally disable
-caching because a 4/8-step distilled trajectory has too few steps to approximate safely.
-
-The deployed path is benchmark-driven: concurrent VAE decoding, combined AdaLN banks, PyTorch 2.13 and always-on
-Triton AdaLN kernels were tested but reverted because they were slower, unsupported on ZeroGPU, or too costly at cold
-start. Video and audio VAEs, normalization, embeddings and output heads remain at higher precision.
-
-Sources: [NVFP4 checkpoint](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4) ·
-[NVIDIA Sana/Sol-Engine](https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3) ·
-[Cache-DiT](https://github.com/vipshop/cache-dit) ·
-[Turbo LoRA](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora). Optimized from the original
-[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space. H/t to **blanchon** for
-pointing me to Sana/Sol-Engine and Cache-DiT.
-"""
-
-with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
-    gr.Markdown(INTRO)
-
-    with gr.Row():
-        with gr.Column(scale=5):
-            prompt = gr.Textbox(
-                label="Describe your video",
-                lines=4,
-                value="A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
-                placeholder="Describe the scene, motion, camera, and sounds you want...",
-            )
-            generation_preset = gr.Radio(
-                label="Speed & quality",
-                choices=[*GENERATION_PRESETS, CUSTOM_PRESET],
-                value=DEFAULT_PRESET,
-                info="Balanced is recommended. Turbo is much faster but can introduce sharpness, texture, or motion artifacts.",
-            )
-            with gr.Row():
-                canvas = gr.Dropdown(label="Size & aspect ratio", choices=list(CANVASES), value=DEFAULT_CANVAS)
-                duration = gr.Slider(
-                    label="Length (seconds)", minimum=MIN_UI_DURATION, maximum=MAX_UI_DURATION, step=1, value=5
-                )
-            with gr.Accordion("Add start / end frames (optional)", open=False):
-                gr.Markdown("Use one image for image-to-video, or both to guide the beginning and ending.")
-                with gr.Row():
-                    image = gr.Image(label="Start frame", type="filepath")
-                    last_image = gr.Image(label="End frame", type="filepath")
-            upsample = gr.Checkbox(
-                label="Enhance my prompt",
-                value=False,
-                info="Adds prompt detail using the separate conditioner Space and may take longer.",
-            )
-            run = gr.Button("Generate video", variant="primary", size="lg")
-
-            with gr.Accordion("Advanced options", open=False):
-                seed = gr.Number(
-                    label="Seed", value=42, precision=0,
-                    info="Reuse the same seed to make comparisons more consistent.",
-                )
-                gr.Markdown(
-                    f"The seed always applies. The engine and LoRA controls below are used only when "
-                    f"**{CUSTOM_PRESET}** is selected above. Regular presets configure them automatically."
-                )
-                acceleration = gr.Radio(
-                    label="Cache mode",
-                    choices=["Ultra Fast", "Balanced", "Exact"],
-                    value="Balanced",
-                    info="Balanced is conservative; Ultra Fast is aggressive; Exact disables approximate caching.",
-                )
-                steps = gr.Slider(
-                    label="Schedule points", minimum=4, maximum=40, step=1, value=28,
-                    info="28 is the normal quality setting. Lower values can reduce quality unless using Turbo.",
-                )
-                lora_preset = gr.Dropdown(
-                    label="LoRA mode",
-                    choices=["None", "Turbo · 4 steps", "Turbo · 8 steps", "Custom"],
-                    value="None",
-                    info="Turbo overrides the step slider and uses exact denoiser calls.",
-                )
-                lora_repo = gr.Textbox(label="Public Hugging Face LoRA repo", placeholder="owner/repository")
-                lora_filename = gr.Textbox(label="LoRA filename", placeholder="adapter.safetensors")
-                lora_strength = gr.Slider(label="LoRA strength", minimum=-2.0, maximum=2.0, step=0.05, value=1.0)
-                gr.Markdown(
-                    "Custom LoRAs must be public H3 A/B safetensors (≤2 GiB); no repository code is executed."
-                )
-
-        with gr.Column(scale=6):
-            video = gr.Video(label="Your video", height=520)
-            report = gr.Markdown(visible=False)
-            # An output, so it can be revealed only for a request that asked for a rewrite.
-            with gr.Accordion("Upsampled prompt", open=False, visible=False) as upsampled_panel:
-                upsampled = gr.Textbox(show_label=False, lines=8, interactive=False)
-
-    image.upload(_fit_keyframe, [image, canvas], [image, canvas])
-    last_image.upload(_fit_keyframe, [last_image, canvas], [last_image, canvas])
-
-    gr.Examples(
-        examples=[
-            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", None, None, "960x544 · 16:9 fast"],
-            ["A busy night market, neon signs reflecting in puddles, sizzling street food", None, None, "544x960 · 9:16 fast"],
-            ["A cellist playing a slow melody in an empty concert hall", None, None, "544x544 · 1:1 fast"],
-            ["The fox looks around, then trots deeper into the forest", "examples/first.png", None, "960x544 · 16:9 fast"],
-            ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", "960x544 · 16:9 fast"],
-        ],
-        inputs=[prompt, image, last_image, canvas],
-        outputs=[video, report, upsampled, upsampled_panel],
-        fn=generate,
-        cache_examples=True,
-        cache_mode="lazy",
-    )
-
-    run.click(
-        generate,
-        [
-            prompt, image, last_image, canvas, duration, steps, seed, upsample, acceleration,
-            lora_preset, lora_repo, lora_filename, lora_strength, generation_preset,
-        ],
-        [video, report, upsampled, upsampled_panel],
-        api_name="generate",
-    )
-
-    with gr.Accordion("Technical details", open=False):
-        gr.Markdown(TECHNICAL_NOTES)
-    with gr.Accordion("Full optimization list", open=False):
-        gr.Markdown(OPTIMIZATIONS)
-
-    gr.Markdown(
-        '<div style="text-align:center"><a href="https://x.com/realmrfakename" target="_blank" '
-        'rel="noopener">@realmrfakename</a></div>'
-    )
-
-
 if __name__ == "__main__":
-    # Adapter state is request-local on the shared transformer, so serialize generation requests explicitly.
-    demo.queue(default_concurrency_limit=1).launch(show_error=True, theme=gr.themes.Citrus(), css=CSS)
+    app.launch(show_error=True, allowed_paths=[OUTPUT_DIR], mcp_server=True)
