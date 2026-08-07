@@ -6,7 +6,7 @@ type FilePayload = { url?: string; path?: string; name?: string; data?: string }
 let clientPromise: Promise<Client> | null = null;
 
 function getClient() {
-  clientPromise ??= Client.connect(window.location.origin);
+  clientPromise ??= Client.connect(window.location.origin, { events: ["data", "status"] });
   return clientPromise;
 }
 
@@ -27,7 +27,7 @@ function statusLabel(message: StatusMessage, startedAt: number): RunProgress {
   const progressItem = [...items].reverse().find(
     (item) => item.desc || item.progress != null || (item.index != null && item.length != null),
   );
-  if (message.stage === "pending") {
+  if (message.stage === "pending" && !progressItem) {
     const position = message.position;
     return {
       stage: "queued",
@@ -38,7 +38,8 @@ function statusLabel(message: StatusMessage, startedAt: number): RunProgress {
       exact: false,
     };
   }
-  if (message.stage === "generating" || message.stage === "streaming") {
+  // Gradio 6 emits explicit gr.Progress packets with stage="pending" even after execution starts.
+  if (message.stage === "generating" || message.stage === "streaming" || progressItem) {
     let fraction = progressItem?.progress ?? null;
     if (fraction == null && progressItem?.index != null && progressItem.length) {
       fraction = progressItem.index / progressItem.length;
