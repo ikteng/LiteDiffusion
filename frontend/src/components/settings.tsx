@@ -322,6 +322,7 @@ export function SpeedSettings({
 }
 
 function ManualControls({ values, update }: { values: GenerationValues; update: Update }) {
+  const directLoraUrl = values.loraRepo.trim().startsWith("https://");
   return (
     <>
       <Field label="Scheduler steps" value={`${values.steps}`}>
@@ -365,20 +366,22 @@ function ManualControls({ values, update }: { values: GenerationValues; update: 
 
       {values.loraPreset === "Custom" && (
         <div className="flex flex-col gap-3">
-          <Field label="LoRA repository">
+          <Field label="LoRA source" hint="A Hugging Face owner/repository or direct public HTTPS safetensors URL.">
             <TextInput
-              placeholder="owner/repository"
+              placeholder="owner/repository or https://…"
               value={values.loraRepo}
               onChange={(event) => update("loraRepo", event.target.value)}
             />
           </Field>
-          <Field label="LoRA file">
-            <TextInput
-              placeholder="adapter.safetensors"
-              value={values.loraFilename}
-              onChange={(event) => update("loraFilename", event.target.value)}
-            />
-          </Field>
+          {!directLoraUrl && (
+            <Field label="LoRA file">
+              <TextInput
+                placeholder="adapter.safetensors"
+                value={values.loraFilename}
+                onChange={(event) => update("loraFilename", event.target.value)}
+              />
+            </Field>
+          )}
         </div>
       )}
 

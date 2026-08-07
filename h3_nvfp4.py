@@ -873,7 +873,9 @@ class H3NVFP4Transformer(nn.Module):
                     consumed.update(qkv_names)
                     continue
                 if raw_name.endswith((".attn.to_k", ".attn.to_v")):
-                    raise ValueError(f"Fused QKV LoRA has no matching query tensor for {raw_name}")
+                    # Alphabetically K and V can appear before Q. The Q branch above validates and consumes the whole
+                    # group when it is reached; defer these names instead of rejecting a correctly ordered state dict.
+                    continue
 
                 a, b, rank_scale = tensors[raw_name]
                 name = self._lora_module_name(raw_name)
@@ -895,6 +897,14 @@ class H3NVFP4Transformer(nn.Module):
                 staged.append(
                     (module, a.to(self.device, torch.bfloat16), b.to(self.device, torch.bfloat16), strength * rank_scale)
                 )
+
+            dangling_qkv = sorted(
+                name
+                for name in tensors
+                if name.endswith((".attn.to_k", ".attn.to_v")) and name not in consumed
+            )
+            if dangling_qkv:
+                raise ValueError(f"Fused QKV LoRA has no matching query tensor for {dangling_qkv[0]}")
 
         if not staged and not staged_parts:
             raise ValueError("No supported H3 LoRA A/B tensor pairs were found.")

@@ -66,7 +66,7 @@ export function loadSpeed(): Partial<SpeedValues> {
   if (typeof stored.loraPreset === "string" && LORA_PRESETS.includes(stored.loraPreset)) {
     speed.loraPreset = stored.loraPreset as LoraPreset;
   }
-  if (typeof stored.loraRepo === "string") speed.loraRepo = stored.loraRepo.slice(0, 200);
+  if (typeof stored.loraRepo === "string") speed.loraRepo = stored.loraRepo.slice(0, 2048);
   if (typeof stored.loraFilename === "string") speed.loraFilename = stored.loraFilename.slice(0, 200);
   if (typeof stored.loraStrength === "number" && Number.isFinite(stored.loraStrength)) {
     speed.loraStrength = Math.min(2, Math.max(0, stored.loraStrength));

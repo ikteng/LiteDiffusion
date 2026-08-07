@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import shutil
+import socket
 import tempfile
 import time
 import traceback
 from functools import cache
+from urllib.parse import urljoin, urlsplit
 
 # Before anything that could initialize CUDA: `import spaces` patches `torch.cuda` so model loading can happen at
 # startup rather than on GPU time.
@@ -353,6 +356,114 @@ def _download_egrid() -> str:
     return path
 
 
+def _lora_cache_directory(source: str) -> str:
+    """Return one bounded cache directory and evict all but the newest other adapter."""
+    root = os.path.join(tempfile.gettempdir(), "h3-lora-downloads")
+    cache_key = hashlib.sha256(source.encode()).hexdigest()[:20]
+    local_dir = os.path.join(root, cache_key)
+    os.makedirs(local_dir, exist_ok=True)
+    others = sorted(
+        (entry for entry in os.scandir(root) if entry.is_dir() and entry.path != local_dir),
+        key=lambda entry: entry.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in others[1:]:
+        shutil.rmtree(stale.path, ignore_errors=True)
+    return local_dir
+
+
+def _validate_public_lora_url(url: str) -> str:
+    """Allow public HTTPS downloads while refusing credentials, unusual ports and private-network destinations."""
+    if len(url) > 2048:
+        raise ValueError("Direct LoRA URL is too long.")
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("Direct LoRA URLs must use public HTTPS.")
+    if parsed.username or parsed.password or parsed.port not in (None, 443):
+        raise ValueError("Direct LoRA URLs cannot contain credentials or a non-standard port.")
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as error:
+        raise ValueError("Direct LoRA URL hostname could not be resolved.") from error
+    if not addresses:
+        raise ValueError("Direct LoRA URL hostname did not resolve.")
+    for raw_address in addresses:
+        address = ipaddress.ip_address(raw_address)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        if not address.is_global:
+            raise ValueError("Direct LoRA URLs cannot access private or local networks.")
+    return url
+
+
+def _download_lora_url(url: str) -> tuple[str, str]:
+    """Stream one public safetensors URL into the bounded adapter cache, validating every redirect and byte."""
+    import requests
+    from safetensors import safe_open
+
+    original = _validate_public_lora_url(url)
+    local_dir = _lora_cache_directory(original)
+    path = os.path.join(local_dir, "adapter.safetensors")
+    if os.path.isfile(path) and 0 < os.path.getsize(path) <= LORA_MAX_BYTES:
+        try:
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                if handle.keys():
+                    os.utime(local_dir, None)
+                    parsed = urlsplit(original)
+                    return path, f"{parsed.hostname}{parsed.path}"[:240]
+        except Exception:
+            os.unlink(path)
+
+    temporary = path + ".download"
+    current = original
+    try:
+        for _ in range(6):
+            current = _validate_public_lora_url(current)
+            with requests.get(
+                current,
+                stream=True,
+                allow_redirects=False,
+                timeout=(10, 120),
+                headers={"User-Agent": "MiniMax-H3-Space/1.0"},
+            ) as response:
+                if response.is_redirect or response.is_permanent_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("Direct LoRA URL returned an empty redirect.")
+                    current = urljoin(current, location)
+                    continue
+                response.raise_for_status()
+                declared = response.headers.get("content-length")
+                if declared is not None and int(declared) > LORA_MAX_BYTES:
+                    raise ValueError("Direct LoRA exceeds the 2 GiB safety limit.")
+                total = 0
+                with open(temporary, "wb") as output:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > LORA_MAX_BYTES:
+                            raise ValueError("Direct LoRA exceeds the 2 GiB safety limit.")
+                        output.write(chunk)
+                if total == 0:
+                    raise ValueError("Direct LoRA URL returned an empty file.")
+                with safe_open(temporary, framework="pt", device="cpu") as handle:
+                    if not handle.keys():
+                        raise ValueError("Direct LoRA contains no safetensors tensors.")
+                os.replace(temporary, path)
+                os.utime(local_dir, None)
+                parsed = urlsplit(original)
+                return path, f"{parsed.hostname}{parsed.path}"[:240]
+        raise ValueError("Direct LoRA URL redirected too many times.")
+    except Exception:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+
+
 def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, str | None, str, float]:
     """Resolve one public safetensors LoRA before ZeroGPU is booked; arbitrary code is never downloaded or run."""
     preset = str(preset or "None")
@@ -366,8 +477,13 @@ def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, 
         repo_id, filename = TURBO_8_LORA_REPO, TURBO_8_LORA_FILE
     else:
         repo_id, filename = str(repo_id or "").strip(), str(filename or "").strip()
+        if repo_id.startswith("https://"):
+            path, label = _download_lora_url(repo_id)
+            return path, _download_egrid(), label, adapter_scale
+        if "://" in repo_id:
+            raise ValueError("Direct LoRA URLs must use public HTTPS.")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_id):
-        raise ValueError("Custom LoRA repo must look like `owner/repository`.")
+        raise ValueError("Custom LoRA source must be `owner/repository` or a public HTTPS URL.")
     if not filename.endswith(".safetensors") or filename.startswith(("/", ".")) or ".." in filename.split("/"):
         raise ValueError("Custom LoRA must be a safe `.safetensors` filename inside that repository.")
 
@@ -377,17 +493,7 @@ def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, 
     if metadata.size is None or metadata.size > LORA_MAX_BYTES:
         raise ValueError("LoRA file is missing a declared size or exceeds the 2 GiB safety limit.")
     # Keep arbitrary public adapters in a bounded temp cache instead of letting user-selected repos fill Space disk.
-    root = os.path.join(tempfile.gettempdir(), "h3-lora-downloads")
-    cache_key = hashlib.sha256(f"{repo_id}\0{filename}".encode()).hexdigest()[:20]
-    local_dir = os.path.join(root, cache_key)
-    os.makedirs(root, exist_ok=True)
-    others = sorted(
-        (entry for entry in os.scandir(root) if entry.is_dir() and entry.path != local_dir),
-        key=lambda entry: entry.stat().st_mtime,
-        reverse=True,
-    )
-    for stale in others[1:]:
-        shutil.rmtree(stale.path, ignore_errors=True)
+    local_dir = _lora_cache_directory(f"hf://{repo_id}/{filename}")
     path = hf_hub_download(repo_id=repo_id, filename=filename, token=False, local_dir=local_dir)
     os.utime(local_dir, None)
     # Only the older pruned-base adapter contains AdaLN targets and needs its external timestep lookup grid. Custom
