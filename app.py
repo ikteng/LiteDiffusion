@@ -565,22 +565,30 @@ def generate(
         + f"denoising {displayed_steps} steps at {width}x{height}, {num_frames} frames ...",
     )
     started = time.time()
-    frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens, cache_stats = _generate_with_hardware_retry(
-        prompt,
-        prompt_embeds,
-        text_token_tags,
-        first_frame,
-        final_frame,
-        height,
-        width,
-        num_frames,
-        steps,
-        seed,
-        run_acceleration,
-        lora_path,
-        egrid_path,
-        float(lora_strength),
-    )
+    # gr.Server does not inject Progress parameters like Blocks does. Bind this request's tracker explicitly so the
+    # spaces.GPU wrapper copies it into the forked worker and forwards Diffusers' tqdm updates back to this event.
+    from gradio.context import LocalContext
+
+    progress_token = LocalContext.progress.set(progress)
+    try:
+        frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens, cache_stats = _generate_with_hardware_retry(
+            prompt,
+            prompt_embeds,
+            text_token_tags,
+            first_frame,
+            final_frame,
+            height,
+            width,
+            num_frames,
+            steps,
+            seed,
+            run_acceleration,
+            lora_path,
+            egrid_path,
+            float(lora_strength),
+        )
+    finally:
+        LocalContext.progress.reset(progress_token)
     generate_seconds = time.time() - started
     cache_stats = cache_stats or {"computed": max(1, int(steps) - 1), "forecasted": 0}
     actual_evaluations = int(cache_stats.get("steps", cache_stats["computed"] + cache_stats["forecasted"]))
@@ -700,7 +708,6 @@ def generate_api(
     lora_filename: str = "",
     lora_strength: float = 1.0,
     generation_preset: str = DEFAULT_PRESET,
-    progress: gr.Progress = gr.Progress(track_tqdm=True),
     request: Request = None,
 ) -> tuple[FileData, str, str]:
     """Queued generation endpoint used by both the React studio and ordinary gradio_client callers."""
@@ -721,7 +728,6 @@ def generate_api(
         lora_strength,
         generation_preset,
         ip_token=ip_token,
-        progress=progress,
     )
 
 
