@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
+import shutil
 import tempfile
 import time
 import traceback
@@ -24,6 +27,15 @@ PLACEMENT = os.environ.get("H3_PLACEMENT", "lazy" if ENGINE == "nvfp4" else "pac
 # cuDNN's fused attention is 10-20% faster than the SDPA default on this pool and needs nothing installed.
 ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
 GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
+TURBO_LORA_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
+TURBO_LORA_FILE = "minimax_h3_turbo_4step_ema_ckpt850.safetensors"
+LORA_MAX_BYTES = 2 * 1024**3
+EGRID_COMMIT = "a7624b4c00626a8ae7e78860769389d706565190"
+EGRID_SHA256 = "30eb3c2cc7fb6b470d9717ff840d359313ac27cd64b705e32da1baa10f72d6a8"
+EGRID_URL = (
+    f"https://raw.githubusercontent.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo/{EGRID_COMMIT}/"
+    "h3_silu_temb_grid.safetensors"
+)
 
 # Must stay identical to the conditioner's table: the *label* goes over the wire, so a canvas that half does not know
 # is rejected there and surfaces as a failure here.
@@ -246,6 +258,74 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewri
         return handle.get_tensor("prompt_embeds"), handle.get_tensor("text_token_tags"), metadata, plan
 
 
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_egrid() -> str:
+    """Fetch the Turbo author's pruned-base timestep grid once, pinned and checksum-verified."""
+    import requests
+
+    directory = os.path.join(tempfile.gettempdir(), "h3-lora-assets")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"h3-silu-temb-{EGRID_SHA256[:12]}.safetensors")
+    if os.path.isfile(path):
+        if _sha256(path) == EGRID_SHA256:
+            return path
+    temporary = path + ".download"
+    with requests.get(EGRID_URL, stream=True, timeout=60) as response:
+        response.raise_for_status()
+        with open(temporary, "wb") as output:
+            for chunk in response.iter_content(1024 * 1024):
+                output.write(chunk)
+    digest = _sha256(temporary)
+    if digest != EGRID_SHA256:
+        os.unlink(temporary)
+        raise ValueError("The pinned H3 timestep grid failed its SHA-256 check.")
+    os.replace(temporary, path)
+    return path
+
+
+def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, str | None, str]:
+    """Resolve one public safetensors LoRA before ZeroGPU is booked; arbitrary code is never downloaded or run."""
+    preset = str(preset or "None")
+    if preset == "None":
+        return None, None, "None"
+    if preset.startswith("Turbo"):
+        repo_id, filename = TURBO_LORA_REPO, TURBO_LORA_FILE
+    else:
+        repo_id, filename = str(repo_id or "").strip(), str(filename or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_id):
+        raise gr.Error("Custom LoRA repo must look like `owner/repository`.")
+    if not filename.endswith(".safetensors") or filename.startswith(("/", ".")) or ".." in filename.split("/"):
+        raise gr.Error("Custom LoRA must be a safe `.safetensors` filename inside that repository.")
+
+    from huggingface_hub import get_hf_file_metadata, hf_hub_download, hf_hub_url
+
+    metadata = get_hf_file_metadata(hf_hub_url(repo_id, filename), token=False)
+    if metadata.size is None or metadata.size > LORA_MAX_BYTES:
+        raise gr.Error("LoRA file is missing a declared size or exceeds the 2 GiB safety limit.")
+    # Keep arbitrary public adapters in a bounded temp cache instead of letting user-selected repos fill Space disk.
+    root = os.path.join(tempfile.gettempdir(), "h3-lora-downloads")
+    cache_key = hashlib.sha256(f"{repo_id}\0{filename}".encode()).hexdigest()[:20]
+    local_dir = os.path.join(root, cache_key)
+    os.makedirs(root, exist_ok=True)
+    others = sorted(
+        (entry for entry in os.scandir(root) if entry.is_dir() and entry.path != local_dir),
+        key=lambda entry: entry.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in others[1:]:
+        shutil.rmtree(stale.path, ignore_errors=True)
+    path = hf_hub_download(repo_id=repo_id, filename=filename, token=False, local_dir=local_dir)
+    os.utime(local_dir, None)
+    return path, _download_egrid(), f"{repo_id}/{filename}"
+
+
 # Seconds of GPU one request needs, from the packed video rows it is about to denoise: linear in the rows for the
 # matmuls, quadratic for the attention, against the AoTI block package this Space runs.
 _DUR_B, _DUR_C = 1.1745e-4, 3.8396e-9
@@ -268,7 +348,10 @@ def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, heig
 
 
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
-def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, acceleration):
+def _generate(
+    prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, acceleration,
+    lora_path, egrid_path, lora_strength,
+):
     """The only thing on GPU time: local conditioning, packed denoising and the two decoders.
 
     Only generated outputs and two timing scalars come back—a `@spaces.GPU` return crosses a process boundary by
@@ -302,10 +385,17 @@ def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height,
         condition_seconds = time.time() - conditioned
         num_text_tokens = int(prompt_embeds.shape[1])
 
+    activate_lora = getattr(PIPE.transformer, "activate_lora", None)
+    clear_lora = getattr(PIPE.transformer, "clear_lora", None)
+    if lora_path and activate_lora is None:
+        raise RuntimeError("LoRAs are supported only by the NVFP4 engine.")
+    if activate_lora is not None:
+        activate_lora(lora_path, egrid_path, float(lora_strength))
     begin_request = getattr(PIPE.transformer, "begin_request", None)
     end_request = getattr(PIPE.transformer, "end_request", None)
     if begin_request is not None:
-        begin_request(int(steps), acceleration)
+        # MiniMaxH3Scheduler includes terminal sigma=0 in `num_inference_steps`, so N points execute N-1 forwards.
+        begin_request(max(1, int(steps) - 1), acceleration)
     cache_stats = None
     try:
         with torch.inference_mode():
@@ -323,6 +413,8 @@ def _generate(prompt, prompt_embeds, text_token_tags, image, last_image, height,
     finally:
         if end_request is not None:
             cache_stats = end_request()
+        if clear_lora is not None:
+            clear_lora()
     return (
         state.get("videos")[0],
         state.get("audio")[0].cpu(),
@@ -348,7 +440,11 @@ def _generate_with_hardware_retry(*args):
         return _generate(*args)
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, acceleration="Balanced", progress=gr.Progress(track_tqdm=True)):
+def generate(
+    prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42,
+    upsample=False, acceleration="Balanced", lora_preset="None", lora_repo="", lora_filename="",
+    lora_strength=1.0, progress=gr.Progress(track_tqdm=True),
+):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
@@ -357,6 +453,21 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     if not prompt or not prompt.strip():
         raise gr.Error("MiniMax-H3 always takes a prompt, keyframes or not.")
     print(f"[prompt] {prompt!r}", flush=True)
+
+    requested_steps = int(steps)
+    displayed_steps = requested_steps
+    if lora_preset == "Turbo · 4 steps":
+        # The native scheduler includes its terminal zero in this count; 5 points produce 4 exact Euler evaluations.
+        steps, displayed_steps = 5, 4
+    elif lora_preset == "Turbo · 8 steps":
+        steps, displayed_steps = 9, 8
+    else:
+        steps = requested_steps
+    lora_path, egrid_path, lora_label = resolve_lora(lora_preset, lora_repo, lora_filename)
+    # Few-step distilled trajectories are too short to benefit safely from block reuse. Their speed comes from the
+    # LoRA; keep every requested Turbo denoiser evaluation exact.
+    run_acceleration = "Exact" if lora_preset.startswith("Turbo") else acceleration
+    acceleration_label = f"{lora_preset}, exact denoiser" if lora_preset.startswith("Turbo") else acceleration
 
     from PIL import Image, ImageOps
 
@@ -399,7 +510,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     progress(
         0.1,
         desc=("Local conditioning + " if prompt_embeds is None else "")
-        + f"denoising {steps} steps at {width}x{height}, {num_frames} frames ...",
+        + f"denoising {displayed_steps} steps at {width}x{height}, {num_frames} frames ...",
     )
     started = time.time()
     frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens, cache_stats = _generate_with_hardware_retry(
@@ -413,10 +524,14 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         num_frames,
         steps,
         seed,
-        acceleration,
+        run_acceleration,
+        lora_path,
+        egrid_path,
+        float(lora_strength),
     )
     generate_seconds = time.time() - started
-    cache_stats = cache_stats or {"computed": int(steps), "forecasted": 0}
+    cache_stats = cache_stats or {"computed": max(1, int(steps) - 1), "forecasted": 0}
+    actual_evaluations = int(cache_stats.get("steps", cache_stats["computed"] + cache_stats["forecasted"]))
     if local_condition_seconds is not None:
         condition_seconds = local_condition_seconds
         num_text_tokens = local_num_text_tokens
@@ -428,12 +543,16 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     encode_video(frames, fps=FPS, output_path=path, audio=audio, audio_sample_rate=sampling_rate)
 
     report = (
-        f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} scheduler steps · "
+        f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), "
+        f"{actual_evaluations} denoiser evaluations · "
         f"{cache_stats['computed']} full DiT evaluations + {cache_stats['forecasted']} cached block-stack reuses "
-        f"({acceleration}) · Sol-Attn {cache_stats.get('sol_sparse_calls', 0)} sparse calls · "
+        f"({acceleration_label}) · LoRA {lora_label if lora_path else 'off'}"
+        f"{f' @ {float(lora_strength):g}' if lora_path else ''} · "
+        f"Sol-Attn {cache_stats.get('sol_sparse_calls', 0)} sparse calls · "
         f"conditioner {condition_seconds:.0f}s ({num_text_tokens} tokens"
         f"{', upsampled' if refined else ''}) · "
-        f"denoise + decode {denoise_seconds:.0f}s ({denoise_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
+        f"denoise + decode {denoise_seconds:.0f}s ({denoise_seconds / max(1, actual_evaluations):.1f} s/eval) · "
+        f"seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
     return path, report, refined, gr.update(visible=bool(refined))
@@ -484,6 +603,8 @@ INTRO = """# MiniMax-H3 Ultra Fast
   <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ model ]</strong></a> &nbsp;
   <a href="https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4" target="_blank" rel="noopener"><strong>[ NVFP4 ]</strong></a> &nbsp;
   <a href="https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3" target="_blank" rel="noopener"><strong>[ Sol-Engine ]</strong></a> &nbsp;
+  <a href="https://github.com/vipshop/cache-dit" target="_blank" rel="noopener"><strong>[ Cache-DiT ]</strong></a> &nbsp;
+  <a href="https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora" target="_blank" rel="noopener"><strong>[ Turbo LoRA ]</strong></a> &nbsp;
   <a href="https://www.minimax.io/blog/minimax-h3" target="_blank" rel="noopener"><strong>[ blog ]</strong></a> &nbsp;
   <a href="https://huggingface.co/spaces/multimodalart/minimax-h3" target="_blank" rel="noopener"><strong>[ original Space ]</strong></a>
 </div>
@@ -491,13 +612,17 @@ INTRO = """# MiniMax-H3 Ultra Fast
 **MiniMax-H3 Ultra Fast** generates video and synchronized sound locally on one Blackwell ZeroGPU worker. The default
 **28-step Balanced** mode keeps the scheduler quality setting while reducing repeated transformer work.
 
-**Modes:** Balanced uses FirstBlockCache and long-sequence Sol-Attn; Ultra Fast adds bounded residual forecasting;
+**Modes:** Balanced uses Cache-DiT DBCache + TaylorSeer and long-sequence Sol-Attn; Ultra Fast adds bounded
+whole-step forecasting;
 Exact disables reuse and sparse attention but retains the lossless kernel/layout optimizations. No prompt-to-video
 result cache is used. A warm 960×544, 56-frame test measured **35s Exact → 23s Balanced (~1.52×)**.
 
+The optional Turbo LoRA runs its distilled trajectory at **4 or 8 exact steps**. Four steps is fastest; eight is the
+higher-quality Turbo setting. A public H3 LoRA in standard A/B `.safetensors` format can also be loaded by repo/file.
+
 Optimized from the original
 [`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space. H/t to **blanchon** for
-pointing me to NVIDIA Sana/Sol-Engine.
+pointing me to NVIDIA Sana/Sol-Engine and Cache-DiT.
 
 If you find this Space helpful, please give it a like <3
 """
@@ -509,9 +634,11 @@ OPTIMIZATIONS = """| Active optimization | What it does |
 | GPU residency | Transformer, conditioner and both full-precision VAEs stay resident; no layerwise CPU offload. |
 | Fused blocks | Fused QKV, Q/K RMSNorm + partial RoPE, fused gate/up MLP layout, and in-place SiLU/gating. |
 | Pruned AdaLN | Replaces 13.04B projection parameters with a 1,025-point curve; one conversion per block. |
-| FirstBlockCache | Balanced evaluates block 1 as a change probe, then safely reuses blocks 2–50 at threshold `0.08`. |
+| Cache-DiT hybrid | F1B0 DBCache probes block 1, reuses blocks 2–50 at threshold `0.08`, and TaylorSeer forecasts the cached residual. |
+| Lean cache probe | 1/8-row DBCache signal removes a full packed-activation clone/reduction; at most two consecutive hits limit drift. |
+| Optional LoRA | Runtime BF16 low-rank branches preserve updates over the NVFP4 base; Turbo gets exact dual-schedule 4/8-step sampling. |
 | Sol-Attn | Long target-video sequences use NVIDIA's sparse Triton kernel; prefix/audio rows remain exact. |
-| Quality guards | First 10 steps, first 2 blocks, 3 warmup steps and 2 tail steps stay dense where applicable. |
+| Quality guards | Sol-Attn waits 10 steps; Cache-DiT keeps 3 warmup + 2 tail steps dense and caps consecutive reuse at 2. |
 | Less output work | Final norm and heads process only retained generated video/audio rows. |
 | Request-local caches | Text refinement, RoPE, segment metadata and static keyframe projections run once per request. |
 | Less memory traffic | No redundant packed-buffer zero-fill, CPU-cached segment row IDs, hoisted hot dispatch lookups. |
@@ -527,8 +654,15 @@ TECHNICAL_NOTES = """### How the speedups compose
 
 NVFP4 and AdaLN pruning make the entire inference stack fit on one worker, eliminating remote conditioning and
 per-layer transfers. Fused layouts reduce launches and activation traffic inside every exact block evaluation.
-FirstBlockCache then removes redundant block-stack evaluations without lowering the requested 28 scheduler steps,
-while Sol-Attn is enabled only above 24,576 packed tokens where quadratic attention can repay its routing overhead.
+Cache-DiT DBCache then removes redundant block-stack evaluations without lowering the requested 28 scheduler steps;
+its first-order TaylorSeer forecast tracks the cached residual instead of freezing it. The custom integration also
+probes only strided rows before block 1, avoiding an otherwise enormous activation clone and full-tensor reduction.
+Sol-Attn is enabled only above 24,576 packed tokens where quadratic attention can repay its routing overhead.
+
+LoRAs run as separate BF16 activation branches, so they are not rounded away by an NVFP4 merge. LarryVrh's Turbo
+LoRA additionally re-injects its full-width timestep update through the author's pinned interpolation grid; the
+existing H3 pipeline already maintains separate video and audio flow schedules. Turbo requests intentionally disable
+caching because a 4/8-step distilled trajectory has too few steps to approximate safely.
 
 The deployed path is benchmark-driven: concurrent VAE decoding, combined AdaLN banks, PyTorch 2.13 and always-on
 Triton AdaLN kernels were tested but reverted because they were slower, unsupported on ZeroGPU, or too costly at cold
@@ -559,10 +693,22 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
                     label="Acceleration",
                     choices=["Ultra Fast", "Balanced", "Exact"],
                     value="Balanced",
-                    info="Balanced: FirstBlockCache + long-sequence Sol-Attn. Ultra Fast: bounded forecasts. Exact: dense.",
+                    info="Balanced: Cache-DiT hybrid + Sol-Attn. Ultra Fast: aggressive forecasts. Exact: dense.",
                 )
-                steps = gr.Slider(label="Scheduler steps", minimum=8, maximum=40, step=1, value=28)
+                steps = gr.Slider(label="Scheduler steps", minimum=4, maximum=40, step=1, value=28)
                 seed = gr.Number(label="Seed", value=42, precision=0)
+                lora_preset = gr.Dropdown(
+                    label="LoRA",
+                    choices=["None", "Turbo · 4 steps", "Turbo · 8 steps", "Custom"],
+                    value="None",
+                    info="Turbo overrides the step slider and uses exact denoiser calls.",
+                )
+                lora_repo = gr.Textbox(label="Custom LoRA repo", placeholder="owner/repository")
+                lora_filename = gr.Textbox(label="Custom LoRA file", placeholder="adapter.safetensors")
+                lora_strength = gr.Slider(label="LoRA strength", minimum=-2.0, maximum=2.0, step=0.05, value=1.0)
+                gr.Markdown(
+                    "Custom LoRAs must be public H3 A/B safetensors (≤2 GiB); no repository code is executed."
+                )
 
         with gr.Column():
             video = gr.Video(label="Video + soundtrack")
@@ -590,7 +736,10 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
 
     run.click(
         generate,
-        [prompt, image, last_image, canvas, duration, steps, seed, upsample, acceleration],
+        [
+            prompt, image, last_image, canvas, duration, steps, seed, upsample, acceleration,
+            lora_preset, lora_repo, lora_filename, lora_strength,
+        ],
         [video, report, upsampled, upsampled_panel],
         api_name="generate",
     )
@@ -604,4 +753,5 @@ with gr.Blocks(title="MiniMax-H3 Ultra Fast") as demo:
 
 
 if __name__ == "__main__":
-    demo.queue().launch(show_error=True, theme=gr.themes.Citrus(), css=CSS)
+    # Adapter state is request-local on the shared transformer, so serialize generation requests explicitly.
+    demo.queue(default_concurrency_limit=1).launch(show_error=True, theme=gr.themes.Citrus(), css=CSS)

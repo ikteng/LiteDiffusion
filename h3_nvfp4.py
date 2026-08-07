@@ -47,9 +47,11 @@ LAYERS = 50
 REFINER_LAYERS = 2
 EPS = 1e-5
 
-# EasyCache is the conservative profile.  The Ultra Fast profile uses a bounded linear residual forecast:
-# three exact warmup evaluations, at most three forecasts in a row, and two exact tail evaluations.  Unlike blind
-# output reuse, forecasting follows the local denoising trajectory while making the amount of saved work predictable.
+# Cache-DiT's DBCache/TaylorSeer design is adapted directly into this custom in-place block loop. The upstream
+# Diffusers hook cannot wrap this lean NVFP4 transformer because it is intentionally not a ModelMixin and its blocks
+# have a fused packed video/audio signature. Balanced uses F1B0 DBCache with a first-order Taylor forecast of the
+# cached tail. Ultra Fast retains the more aggressive full-output forecast.
+# https://github.com/vipshop/cache-dit
 EASYCACHE_THRESHOLD = max(0.0, float(os.environ.get("H3_EASYCACHE_THRESHOLD", "0.10")))
 EASYCACHE_START = min(1.0, max(0.0, float(os.environ.get("H3_EASYCACHE_START", "0.15"))))
 EASYCACHE_END = min(1.0, max(EASYCACHE_START, float(os.environ.get("H3_EASYCACHE_END", "0.95"))))
@@ -57,6 +59,8 @@ EASYCACHE_SUBSAMPLE = max(1, int(os.environ.get("H3_EASYCACHE_SUBSAMPLE", "8")))
 FIRST_BLOCK_THRESHOLD = max(0.0, float(os.environ.get("H3_FIRST_BLOCK_THRESHOLD", "0.08")))
 FIRST_BLOCK_DENSE_START = max(1, int(os.environ.get("H3_FIRST_BLOCK_DENSE_START", "3")))
 FIRST_BLOCK_DENSE_END = max(1, int(os.environ.get("H3_FIRST_BLOCK_DENSE_END", "2")))
+FIRST_BLOCK_SUBSAMPLE = max(1, int(os.environ.get("H3_FIRST_BLOCK_SUBSAMPLE", "8")))
+FIRST_BLOCK_MAX_CACHED = max(1, int(os.environ.get("H3_FIRST_BLOCK_MAX_CACHED", "2")))
 FORECAST_BLEND = min(1.0, max(0.0, float(os.environ.get("H3_FORECAST_BLEND", "0.65"))))
 FUSED_ADALN = os.environ.get("H3_FUSED_ADALN", "0") == "1" and triton is not None
 SOL_ATTN = os.environ.get("H3_SOL_ATTN", "1") == "1"
@@ -126,9 +130,11 @@ class H3StepCache:
         self.pending_input = None
         self.pending_input_change = None
         self.pending_track = False
-        self.head_residual = None
+        self.head_residual_probe = None
         self.tail_residual = None
+        self.tail_residual_slope = None
         self.first_block_output = None
+        self.last_tail_step = None
 
     def begin(self, total_steps: int | None, profile: str = "balanced") -> None:
         self.__init__()
@@ -219,31 +225,33 @@ class H3StepCache:
             return video_input + self.video_residual, audio_input + self.audio_residual
         return None
 
-    def first_block_decision(self, block_input: torch.Tensor, block_output: torch.Tensor) -> bool:
+    def first_block_decision(self, block_input_probe: torch.Tensor, block_output: torch.Tensor) -> bool:
         """Return True when blocks 1..49 can reuse their previous joint residual.
 
-        This is the single-GPU equivalent of NVIDIA Sol-Engine's H3 FirstBlockCache at threshold 0.08. The first
-        block is always evaluated. Its normalized residual change is a much stronger predictor than raw latent
-        motion, while the cached tail residual still covers the complete text/video/audio packed sequence.
+        This is Cache-DiT DBCache F1B0, specialized for H3's fused packed sequence. The first block is always
+        evaluated. A strided probe supplies the normalized residual-difference signal, avoiding two reductions over
+        the full multi-hundred-MB activation while the cached tail still covers every text/video/audio row.
         """
         if not self.enabled or self.profile.startswith("ultra"):
             return False
         if FIRST_BLOCK_THRESHOLD <= 0.0:
+            # Keep the Balanced step clock healthy when caching is disabled through the environment.
             self.first_block_output = block_output.detach().clone()
             return False
 
         keep_dense = self.step < FIRST_BLOCK_DENSE_START or self.step >= self.total_steps - FIRST_BLOCK_DENSE_END
-        residual = block_output - block_input
+        residual_probe = block_output[::FIRST_BLOCK_SUBSAMPLE] - block_input_probe
         reusable = (
             not keep_dense
-            and self.head_residual is not None
+            and self.consecutive_skips < FIRST_BLOCK_MAX_CACHED
+            and self.head_residual_probe is not None
             and self.tail_residual is not None
             and self.tail_residual.shape == block_output.shape
         )
         should_reuse = False
         if reusable:
-            difference = (residual - self.head_residual).abs().mean()
-            reference = self.head_residual.abs().mean().clamp_min(1e-8)
+            difference = (residual_probe - self.head_residual_probe).abs().mean()
+            reference = self.head_residual_probe.abs().mean().clamp_min(1e-8)
             should_reuse = bool(((difference / reference) <= FIRST_BLOCK_THRESHOLD).item())
 
         if should_reuse:
@@ -252,16 +260,28 @@ class H3StepCache:
             self.step += 1
             return True
 
-        # This engine's residual/gate operations update `packed` in place. Preserve the head output before later
-        # blocks mutate the same storage; diffusers' reference blocks are out-of-place and do not need this clone.
+        self.head_residual_probe = residual_probe.detach()
+        # Only dense steps need the full head anchor. Previously both the input and output were cloned every step;
+        # probing the input before block 0 removes one full-sequence copy from cache-hit steps entirely.
         self.first_block_output = block_output.detach().clone()
-        self.head_residual = residual.detach()
         return False
+
+    def apply_cached_tail(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Apply Cache-DiT's cached residual and first-order TaylorSeer forecast without full-size temporaries."""
+        hidden_states.add_(self.tail_residual)
+        if self.tail_residual_slope is not None and self.last_tail_step is not None:
+            hidden_states.add_(self.tail_residual_slope, alpha=self.step - self.last_tail_step)
+        return hidden_states
 
     def update_first_block_tail(self, final_block_output: torch.Tensor) -> None:
         if self.first_block_output is None:
             return
-        self.tail_residual = (final_block_output - self.first_block_output).detach()
+        new_tail = (final_block_output - self.first_block_output).detach()
+        if self.tail_residual is not None and self.last_tail_step is not None:
+            gap = max(1, self.step - self.last_tail_step)
+            self.tail_residual_slope = (new_tail - self.tail_residual) / gap
+        self.tail_residual = new_tail
+        self.last_tail_step = self.step
         self.last_actual_step = self.step
         self.consecutive_skips = 0
         self.step += 1
@@ -309,7 +329,7 @@ class H3StepCache:
         if self.enabled and self.step:
             computed = max(1, self.step - self.skipped)
             print(
-                f"[h3-nvfp4] adaptive step cache skipped {self.skipped}/{self.step} transformer evaluations "
+                f"[h3-nvfp4] Cache-DiT reused {self.skipped}/{self.step} block-stack evaluations "
                 f"({self.step / computed:.2f}x denoiser-work reduction)",
                 flush=True,
             )
@@ -423,6 +443,20 @@ class H3Linear(nn.Module):
         self.register_buffer("pre_quant_scale", None)
         self.quantized = False
         self.full_precision_mm = False
+        # LoRAs stay as an activation-space BF16 branch. Merging into NVFP4 would requantize most of the small update
+        # away; these are deliberately plain request-local tensors so Space packing never duplicates optional LoRAs.
+        self.lora_a = None
+        self.lora_b = None
+        self.lora_scale = 0.0
+
+    def set_lora(self, a: torch.Tensor | None, b: torch.Tensor | None, scale: float = 1.0) -> None:
+        self.lora_a, self.lora_b, self.lora_scale = a, b, float(scale)
+
+    def _apply_lora(self, source: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        if self.lora_a is None or self.lora_b is None or self.lora_scale == 0.0:
+            return output
+        delta = F.linear(F.linear(source.to(self.lora_a.dtype), self.lora_a), self.lora_b)
+        return output.add_(delta.to(output.dtype), alpha=self.lora_scale)
 
     def load(self, handle, prefix: str) -> None:
         config = _quant_config(handle, prefix)
@@ -462,23 +496,26 @@ class H3Linear(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        lora_input = hidden_states
         if self.pre_quant_scale is not None:
             hidden_states = hidden_states * self.pre_quant_scale.to(
                 device=hidden_states.device, dtype=hidden_states.dtype
             )
         if not self.quantized:
             hidden_states = hidden_states.to(self.weight.dtype)
-            return F.linear(
+            output = F.linear(
                 hidden_states,
                 self.weight,
                 self.bias,
             )
+            return self._apply_lora(lora_input, output)
 
         if self.full_precision_mm:
             # Some AWQ checkpoints use NVFP4 as a compact weight format but deliberately retain BF16 activations and
             # GEMMs. Dequantization is layer-local, so residency stays compact without adding activation error.
             weight = self.weight.dequantize().to(hidden_states.dtype)
-            return F.linear(hidden_states, weight, None if self.bias is None else self.bias.to(hidden_states.dtype))
+            output = F.linear(hidden_states, weight, None if self.bias is None else self.bias.to(hidden_states.dtype))
+            return self._apply_lora(lora_input, output)
 
         shape = hidden_states.shape
         flat = hidden_states.reshape(-1, shape[-1])
@@ -489,7 +526,8 @@ class H3Linear(nn.Module):
             self.weight,
             None if self.bias is None else self.bias.to(hidden_states.dtype),
         )
-        return output.reshape(*shape[:-1], self.out_features)
+        output = output.reshape(*shape[:-1], self.out_features)
+        return self._apply_lora(lora_input, output)
 
 
 class H3RMSNorm(nn.Module):
@@ -597,12 +635,21 @@ class H3AdaLN(nn.Module):
         self.linear = H3Linear(
             TIME_DIM, expand * HIDDEN * modalities, bias=True, compute_dtype=torch.float32
         )
+        self.lora_a = None
+        self.lora_b = None
+        self.lora_scale = 0.0
+
+    def set_lora(self, a: torch.Tensor | None, b: torch.Tensor | None, scale: float = 1.0) -> None:
+        self.lora_a, self.lora_b, self.lora_scale = a, b, float(scale)
 
     def load(self, handle, prefix: str) -> None:
         self.linear.load(handle, f"{prefix}.linear")
 
-    def forward(self, time_embedding, output_dtype=None):
+    def forward(self, time_embedding, output_dtype=None, lora_time_embedding=None):
         projected = self.linear(time_embedding)
+        if self.lora_a is not None and lora_time_embedding is not None and self.lora_scale != 0.0:
+            delta = F.linear(F.linear(lora_time_embedding.to(self.lora_a.dtype), self.lora_a), self.lora_b)
+            projected = projected.add_(delta.to(projected.dtype), alpha=self.lora_scale)
         if output_dtype is not None:
             # One contiguous conversion is numerically identical to converting the six chunk views independently,
             # and removes five CUDA launches from every one of the 50 blocks.
@@ -673,6 +720,9 @@ class H3NVFP4Transformer(nn.Module):
         self._condition_video_embedding = None
         self._output_indices = None
         self._generated_rows = None
+        self._lora_egrid = None
+        self._active_lora = None
+        self._active_lora_modules = 0
         self._step_cache = H3StepCache()
         self._sol_attention = H3SolAttention()
 
@@ -707,6 +757,96 @@ class H3NVFP4Transformer(nn.Module):
     def set_attention_backend(self, backend: str) -> None:
         self.attention_backend = backend
 
+    @staticmethod
+    def _lora_module_name(name: str) -> str:
+        name = name.removeprefix("diffusion_model.")
+        # The released LoRA follows the reference model's named container; this adapter uses a bare ModuleList.
+        return name.replace("token_refiner.blocks.", "token_refiner.")
+
+    def clear_lora(self) -> None:
+        for module in self.modules():
+            if isinstance(module, (H3Linear, H3AdaLN)):
+                module.set_lora(None, None, 0.0)
+        self._lora_egrid = None
+        self._active_lora = None
+        self._active_lora_modules = 0
+
+    def activate_lora(self, path: str | None, egrid_path: str | None, strength: float = 1.0) -> int:
+        """Attach one standard H3 A/B safetensors LoRA without dequantizing the NVFP4 base."""
+        self.clear_lora()
+        if not path:
+            return 0
+        from safetensors import safe_open
+
+        staged = []
+        needs_egrid = False
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            keys = set(handle.keys())
+            names = sorted(
+                key.rsplit(".lora_", 1)[0]
+                for key in keys
+                if key.endswith(".lora_A.weight")
+            )
+            for raw_name in names:
+                a_key, b_key = raw_name + ".lora_A.weight", raw_name + ".lora_B.weight"
+                if b_key not in keys:
+                    raise ValueError(f"LoRA is missing {b_key}")
+                name = self._lora_module_name(raw_name)
+                if name.endswith(".adaln_proj.linear"):
+                    module = self.get_submodule(name.removesuffix(".linear"))
+                    expected_in = 2688
+                    expected_out = module.expand * HIDDEN * module.modalities
+                    needs_egrid = True
+                else:
+                    module = self.get_submodule(name)
+                    if not isinstance(module, H3Linear):
+                        raise ValueError(f"Unsupported H3 LoRA target: {raw_name}")
+                    expected_in, expected_out = module.in_features, module.out_features
+                a, b = handle.get_tensor(a_key), handle.get_tensor(b_key)
+                if a.ndim != 2 or b.ndim != 2 or a.shape[1] != expected_in or b.shape[0] != expected_out:
+                    raise ValueError(
+                        f"LoRA shape mismatch for {raw_name}: A{tuple(a.shape)} B{tuple(b.shape)}, "
+                        f"expected [rank,{expected_in}] and [{expected_out},rank]"
+                    )
+                if a.shape[0] != b.shape[1] or a.shape[0] > 256:
+                    raise ValueError(f"Invalid or excessive LoRA rank for {raw_name}: {a.shape[0]}")
+                alpha_key = raw_name + ".alpha"
+                rank_scale = float(handle.get_tensor(alpha_key).item()) / a.shape[0] if alpha_key in keys else 1.0
+                staged.append(
+                    (module, a.to(self.device, torch.bfloat16), b.to(self.device, torch.bfloat16), strength * rank_scale)
+                )
+
+        if not staged:
+            raise ValueError("No supported `.lora_A.weight` / `.lora_B.weight` pairs were found.")
+        if needs_egrid:
+            if not egrid_path:
+                raise ValueError("This pruned-base LoRA needs the H3 timestep embedding grid.")
+            with safe_open(egrid_path, framework="pt", device="cpu") as handle:
+                grid = handle.get_tensor("silu_t_emb_grid")
+            if grid.ndim != 2 or grid.shape[1] != 2688:
+                raise ValueError(f"Invalid H3 timestep grid shape: {tuple(grid.shape)}")
+            self._lora_egrid = grid.to(self.device, torch.bfloat16)
+        for module, a, b, scale in staged:
+            module.set_lora(a, b, scale)
+        self._active_lora = os.path.basename(path)
+        self._active_lora_modules = len(staged)
+        print(
+            f"[h3-lora] active {self._active_lora}: {len(staged)} targets, strength {float(strength):g}",
+            flush=True,
+        )
+        return len(staged)
+
+    def _lora_time_embedding(self, timestep: torch.Tensor) -> torch.Tensor | None:
+        if self._lora_egrid is None:
+            return None
+        position = timestep.float().clamp(0.0, 1.0) * (self._lora_egrid.shape[0] - 1)
+        lower = position.floor().long().clamp(max=self._lora_egrid.shape[0] - 2)
+        return torch.lerp(
+            self._lora_egrid[lower],
+            self._lora_egrid[lower + 1],
+            (position - lower).unsqueeze(1),
+        )
+
     def begin_request(self, total_steps: int | None = None, profile: str = "balanced") -> None:
         self._text_cache = None
         self._rope_cache = None
@@ -723,6 +863,8 @@ class H3NVFP4Transformer(nn.Module):
         stats["sol_sparse_calls"] = self._sol_attention.sparse_calls
         stats["sol_dense_calls"] = self._sol_attention.dense_calls
         stats["sol_failure"] = self._sol_attention.failure
+        stats["lora"] = self._active_lora
+        stats["lora_modules"] = self._active_lora_modules
         self._text_cache = None
         self._rope_cache = None
         self._segment_cache = None
@@ -870,6 +1012,7 @@ class H3NVFP4Transformer(nn.Module):
         packed.index_copy_(0, audio_indices, audio)
 
         time_embedding = self._time_embedding(timestep)
+        lora_time_embedding = self._lora_time_embedding(timestep)
         adaln_indices = timestep_indices * 3 + token_tags.clamp(min=0)
         segments = self._segments(adaln_indices)
         rope = self._rope(position_ids, packed.dtype)
@@ -879,11 +1022,11 @@ class H3NVFP4Transformer(nn.Module):
         reused_tail = False
         for layer, block in enumerate(self.blocks):
             if layer == 0:
-                # Block 0 writes its residual updates in place, so retain the pre-block value for the official FBC
-                # signal `(head_output - head_input)`.
-                block_input = packed.detach().clone()
+                # Block 0 updates the packed tensor in place. Cache-DiT only needs a strided input probe for its
+                # decision; a full anchor is created later only when the remaining blocks really run.
+                block_input_probe = packed[::FIRST_BLOCK_SUBSAMPLE].detach().clone()
             # One conversion per small modulation table, rather than one conversion per sequence segment.
-            modulations = block.adaln_proj(time_embedding, packed.dtype)
+            modulations = block.adaln_proj(time_embedding, packed.dtype, lora_time_embedding)
             shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = modulations
             normalized = self._modulate(block.norm1(packed), shift_attn, scale_attn, adaln_indices, segments)
             packed = self._gate(
@@ -903,14 +1046,14 @@ class H3NVFP4Transformer(nn.Module):
             packed = self._gate(packed, block.mlp(normalized), gate_mlp, adaln_indices, segments)
 
             if layer == 0:
-                if self._step_cache.first_block_decision(block_input, packed):
-                    packed = packed + self._step_cache.tail_residual
+                if self._step_cache.first_block_decision(block_input_probe, packed):
+                    packed = self._step_cache.apply_cached_tail(packed)
                     reused_tail = True
                     break
             if layer == len(self.blocks) - 1 and not reused_tail:
                 self._step_cache.update_first_block_tail(packed)
 
-        shift, scale = self.final_layer.adaln_proj(time_embedding)
+        shift, scale = self.final_layer.adaln_proj(time_embedding, lora_time_embedding=lora_time_embedding)
 
         # Keyframe output rows are discarded by the scheduler. Avoid their FP32 output projection and put zeros in
         # those unused slots to retain the pipeline's expected tensor shape.
@@ -962,6 +1105,6 @@ def load_transformer() -> H3NVFP4Transformer:
 
 def status() -> str:
     return (
-        f"NVFP4 · linear residual forecast {FORECAST_BLEND:g} / adaptive cache {EASYCACHE_THRESHOLD:g} · "
+        f"NVFP4 · Cache-DiT F1B0+TaylorSeer {FIRST_BLOCK_THRESHOLD:g} / forecast {FORECAST_BLEND:g} · "
         f"pruned AdaLN curve · fused QKV/QK-norm/RoPE · `{NVFP4_REPO}`"
     )
