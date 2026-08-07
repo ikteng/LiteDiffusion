@@ -20,7 +20,7 @@ import {
   FPS,
 } from "../lib/studio";
 import { cx } from "../lib/cx";
-import type { Acceleration, GenerationValues, LoraPreset, StudioConfig } from "../types";
+import type { Acceleration, GenerationValues, LoraPreset, RuntimeEstimate, StudioConfig } from "../types";
 import { Field, NumberInput, Switch, TextInput } from "../ui/Controls";
 import { Segmented } from "../ui/Segmented";
 import { Slider } from "../ui/Slider";
@@ -191,7 +191,12 @@ export function LengthSettings({ config, values, update }: SettingsProps) {
  * *not* on the axis lives under Advanced: manual control, which is an escape from the presets rather than a point
  * along them.
  */
-export function SpeedSettings({ config, values, update }: SettingsProps) {
+export function SpeedSettings({
+  config,
+  values,
+  update,
+  runtimeEstimate,
+}: SettingsProps & { runtimeEstimate: RuntimeEstimate | null }) {
   const axis = presetAxis(config.presets);
   const custom = config.presets.find((preset) => preset.custom);
   const manual = custom != null && values.preset === custom.value;
@@ -211,7 +216,10 @@ export function SpeedSettings({ config, values, update }: SettingsProps) {
     <div className="flex flex-col gap-3.5">
       {/* The same label/value row as Clip length, so the two sliders in the rail read as one control repeated rather
           than two different ideas. Cost is to a preset what frame count is to a duration: the number you are trading. */}
-      <Field label="Preset" value={budget}>
+      <Field
+        label="Preset"
+        value={runtimeEstimate ? `ETA ≈${formatBudget(runtimeEstimate.seconds)}` : "ETA learning"}
+      >
         <Slider
           ariaLabel="Generation preset"
           stops={axis.map((preset) => presetName(preset.value))}
@@ -258,7 +266,7 @@ export function SpeedSettings({ config, values, update }: SettingsProps) {
         {/* The cost is already the value on the slider's own label row; repeating it here would make three copies
             of one number in a card three lines tall. */}
         <p className="tabular mt-1.5 text-[11px] text-faint">
-          {steps} steps · {manual ? values.acceleration : current.acceleration} cache
+          {steps} steps · {manual ? values.acceleration : current.acceleration} cache · GPU booking {budget}
         </p>
       </motion.div>
 
@@ -306,8 +314,8 @@ export function SpeedSettings({ config, values, update }: SettingsProps) {
       )}
 
       <p className="text-[11px] leading-[1.5] text-faint">
-        Times are the ZeroGPU allocation each run books, not a promise of wall-clock speed — a lighter cache engine
-        finishes sooner without booking less.
+        ETA is learned from completed wall-clock runs of this preset in this browser. GPU booking is shown separately
+        because it is quota, not elapsed time.
       </p>
     </div>
   );

@@ -447,12 +447,36 @@ class H3Linear(nn.Module):
         # away; these are deliberately plain request-local tensors so Space packing never duplicates optional LoRAs.
         self.lora_a = None
         self.lora_b = None
+        self.lora_parts = None
         self.lora_scale = 0.0
 
     def set_lora(self, a: torch.Tensor | None, b: torch.Tensor | None, scale: float = 1.0) -> None:
         self.lora_a, self.lora_b, self.lora_scale = a, b, float(scale)
+        self.lora_parts = None
+
+    def set_lora_parts(self, parts: list[tuple[torch.Tensor, torch.Tensor, int, int]], scale: float = 1.0) -> None:
+        """Attach separate low-rank updates to slices of one fused output matrix (Diffusers Q/K/V -> packed QKV)."""
+        self.lora_a = self.lora_b = None
+        # Concatenate A once at activation time. Doing this inside every transformer forward would copy hundreds of MB
+        # over a four-step request and erase much of the Turbo speedup.
+        self.lora_parts = (
+            torch.cat([a for a, _, _, _ in parts]),
+            [(b, start, end, a.shape[0]) for a, b, start, end in parts],
+        )
+        self.lora_scale = float(scale)
 
     def _apply_lora(self, source: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        if self.lora_parts and self.lora_scale != 0.0:
+            # Fuse the three input projections into one GEMM, then retain separate B matrices so the block-diagonal
+            # output projection does not waste 3x the arithmetic on zeros.
+            lora_a, outputs = self.lora_parts
+            low_rank = F.linear(source.to(lora_a.dtype), lora_a)
+            offset = 0
+            for b, start, end, rank in outputs:
+                delta = F.linear(low_rank[..., offset : offset + rank], b)
+                output[..., start:end].add_(delta.to(output.dtype), alpha=self.lora_scale)
+                offset += rank
+            return output
         if self.lora_a is None or self.lora_b is None or self.lora_scale == 0.0:
             return output
         delta = F.linear(F.linear(source.to(self.lora_a.dtype), self.lora_a), self.lora_b)
@@ -760,8 +784,15 @@ class H3NVFP4Transformer(nn.Module):
     @staticmethod
     def _lora_module_name(name: str) -> str:
         name = name.removeprefix("diffusion_model.")
-        # The released LoRA follows the reference model's named container; this adapter uses a bare ModuleList.
-        return name.replace("token_refiner.blocks.", "token_refiner.")
+        # Released adapters use several names for the Diffusers containers; this engine keeps both as bare ModuleLists.
+        return (
+            name.replace("token_refiner.refiner_blocks.", "token_refiner.")
+            .replace("token_refiner.blocks.", "token_refiner.")
+            .replace("transformer_blocks.", "blocks.")
+            .replace(".attn.to_out.0", ".attn.out_proj")
+            .replace(".ff.net.0.proj", ".mlp.fc1")
+            .replace(".ff.net.2", ".mlp.fc2")
+        )
 
     def clear_lora(self) -> None:
         for module in self.modules():
@@ -779,18 +810,72 @@ class H3NVFP4Transformer(nn.Module):
         from safetensors import safe_open
 
         staged = []
+        staged_parts = []
         needs_egrid = False
         with safe_open(path, framework="pt", device="cpu") as handle:
             keys = set(handle.keys())
-            names = sorted(
-                key.rsplit(".lora_", 1)[0]
-                for key in keys
-                if key.endswith(".lora_A.weight")
-            )
-            for raw_name in names:
-                a_key, b_key = raw_name + ".lora_A.weight", raw_name + ".lora_B.weight"
+            pairs = []
+            for a_suffix, b_suffix in (
+                (".lora_A.weight", ".lora_B.weight"),
+                (".lora_A.default.weight", ".lora_B.default.weight"),
+            ):
+                pairs.extend(
+                    (key[: -len(a_suffix)], key, key[: -len(a_suffix)] + b_suffix)
+                    for key in keys
+                    if key.endswith(a_suffix)
+                )
+            tensors = {}
+            for raw_name, a_key, b_key in sorted(pairs):
                 if b_key not in keys:
                     raise ValueError(f"LoRA is missing {b_key}")
+                a, b = handle.get_tensor(a_key), handle.get_tensor(b_key)
+                if a.ndim != 2 or b.ndim != 2 or a.shape[0] != b.shape[1] or a.shape[0] > 256:
+                    raise ValueError(f"Invalid H3 LoRA matrices for {raw_name}: A{tuple(a.shape)} B{tuple(b.shape)}")
+                alpha_key = raw_name + ".alpha"
+                rank_scale = float(handle.get_tensor(alpha_key).item()) / a.shape[0] if alpha_key in keys else 1.0
+                tensors[raw_name] = (a, b, rank_scale)
+
+            consumed = set()
+            for raw_name in sorted(tensors):
+                if raw_name in consumed:
+                    continue
+                if raw_name.endswith(".attn.to_q"):
+                    base = raw_name.removesuffix(".attn.to_q")
+                    qkv_names = [f"{base}.attn.to_{part}" for part in "qkv"]
+                    if not all(name in tensors for name in qkv_names):
+                        raise ValueError(f"Fused QKV LoRA is incomplete for {base}")
+                    name = self._lora_module_name(f"{base}.attn.qkv_proj")
+                    module = self.get_submodule(name)
+                    if not isinstance(module, H3Linear) or module.out_features % 3:
+                        raise ValueError(f"Unsupported fused H3 QKV target: {base}")
+                    output_width = module.out_features // 3
+                    parts = []
+                    scales = set()
+                    for index, qkv_name in enumerate(qkv_names):
+                        a, b, rank_scale = tensors[qkv_name]
+                        if a.shape[1] != module.in_features or b.shape[0] != output_width:
+                            raise ValueError(
+                                f"LoRA shape mismatch for {qkv_name}: A{tuple(a.shape)} B{tuple(b.shape)}, "
+                                f"expected [rank,{module.in_features}] and [{output_width},rank]"
+                            )
+                        parts.append(
+                            (
+                                a.to(self.device, torch.bfloat16),
+                                b.to(self.device, torch.bfloat16),
+                                index * output_width,
+                                (index + 1) * output_width,
+                            )
+                        )
+                        scales.add(rank_scale)
+                    if len(scales) != 1:
+                        raise ValueError(f"Q/K/V LoRA scales differ for {base}")
+                    staged_parts.append((module, parts, strength * scales.pop()))
+                    consumed.update(qkv_names)
+                    continue
+                if raw_name.endswith((".attn.to_k", ".attn.to_v")):
+                    raise ValueError(f"Fused QKV LoRA has no matching query tensor for {raw_name}")
+
+                a, b, rank_scale = tensors[raw_name]
                 name = self._lora_module_name(raw_name)
                 if name.endswith(".adaln_proj.linear"):
                     module = self.get_submodule(name.removesuffix(".linear"))
@@ -802,22 +887,17 @@ class H3NVFP4Transformer(nn.Module):
                     if not isinstance(module, H3Linear):
                         raise ValueError(f"Unsupported H3 LoRA target: {raw_name}")
                     expected_in, expected_out = module.in_features, module.out_features
-                a, b = handle.get_tensor(a_key), handle.get_tensor(b_key)
                 if a.ndim != 2 or b.ndim != 2 or a.shape[1] != expected_in or b.shape[0] != expected_out:
                     raise ValueError(
                         f"LoRA shape mismatch for {raw_name}: A{tuple(a.shape)} B{tuple(b.shape)}, "
                         f"expected [rank,{expected_in}] and [{expected_out},rank]"
                     )
-                if a.shape[0] != b.shape[1] or a.shape[0] > 256:
-                    raise ValueError(f"Invalid or excessive LoRA rank for {raw_name}: {a.shape[0]}")
-                alpha_key = raw_name + ".alpha"
-                rank_scale = float(handle.get_tensor(alpha_key).item()) / a.shape[0] if alpha_key in keys else 1.0
                 staged.append(
                     (module, a.to(self.device, torch.bfloat16), b.to(self.device, torch.bfloat16), strength * rank_scale)
                 )
 
-        if not staged:
-            raise ValueError("No supported `.lora_A.weight` / `.lora_B.weight` pairs were found.")
+        if not staged and not staged_parts:
+            raise ValueError("No supported H3 LoRA A/B tensor pairs were found.")
         if needs_egrid:
             if not egrid_path:
                 raise ValueError("This pruned-base LoRA needs the H3 timestep embedding grid.")
@@ -828,13 +908,16 @@ class H3NVFP4Transformer(nn.Module):
             self._lora_egrid = grid.to(self.device, torch.bfloat16)
         for module, a, b, scale in staged:
             module.set_lora(a, b, scale)
+        for module, parts, scale in staged_parts:
+            module.set_lora_parts(parts, scale)
         self._active_lora = os.path.basename(path)
-        self._active_lora_modules = len(staged)
+        self._active_lora_modules = len(staged) + sum(len(parts) for _, parts, _ in staged_parts)
         print(
-            f"[h3-lora] active {self._active_lora}: {len(staged)} targets, strength {float(strength):g}",
+            f"[h3-lora] active {self._active_lora}: {self._active_lora_modules} targets, "
+            f"strength {float(strength):g}",
             flush=True,
         )
-        return len(staged)
+        return self._active_lora_modules
 
     def _lora_time_embedding(self, timestep: torch.Tensor) -> torch.Tensor | None:
         if self._lora_egrid is None:

@@ -5,7 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
 import { FADE, POP } from "../lib/motion";
 import { findPreset, formatBudget } from "../lib/studio";
-import type { GenerationValues, StudioConfig } from "../types";
+import type { GenerationValues, RuntimeEstimate, StudioConfig } from "../types";
 import { Button } from "../ui/Button";
 import { Section } from "../ui/Section";
 import {
@@ -27,6 +27,7 @@ type Props = {
   running: boolean;
   /** Non-null when generating is impossible right now — shown in place of the GPU estimate. */
   blockedReason: string | null;
+  runtimeEstimate: RuntimeEstimate | null;
 };
 
 /**
@@ -41,7 +42,16 @@ type Props = {
  * past the prompt would never find that out. It is also the only setting that persists between visits, which is what
  * makes putting it at the top cheap rather than nagging: set it once and the rail opens on your answer.
  */
-export function ComposeRail({ config, values, update, onApplyExample, onGenerate, running, blockedReason }: Props) {
+export function ComposeRail({
+  config,
+  values,
+  update,
+  onApplyExample,
+  onGenerate,
+  running,
+  blockedReason,
+  runtimeEstimate,
+}: Props) {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const preset = findPreset(config, values.preset);
   const steps = preset.custom ? values.steps : preset.steps;
@@ -81,14 +91,14 @@ export function ComposeRail({ config, values, update, onApplyExample, onGenerate
                     onClick={() => update("preset", faster.preset)}
                     className="text-accent hover:bg-accent/12 hover:text-accent"
                   >
-                    <Gauge /> Save {formatBudget(faster.saves)}
+                    <Gauge /> Book {formatBudget(faster.saves)} less
                   </Button>
                 </motion.div>
               )}
             </AnimatePresence>
           }
         >
-          <SpeedSettings config={config} values={values} update={update} />
+          <SpeedSettings config={config} values={values} update={update} runtimeEstimate={runtimeEstimate} />
         </Section>
 
         <Section
@@ -152,19 +162,19 @@ export function ComposeRail({ config, values, update, onApplyExample, onGenerate
           </div>
         </Section>
 
-        <Section title="Keyframes">
+        <Section title="Keyframes" defaultOpen={false}>
           <KeyframeSettings values={values} update={update} />
         </Section>
 
-        <Section title="Format">
+        <Section title="Format" defaultOpen={false}>
           <FormatSettings config={config} values={values} update={update} />
         </Section>
 
-        <Section title="Length">
+        <Section title="Length" defaultOpen={false}>
           <LengthSettings config={config} values={values} update={update} />
         </Section>
 
-        <Section title="Seed">
+        <Section title="Seed" defaultOpen={false}>
           <SeedSettings values={values} update={update} />
         </Section>
       </div>
@@ -175,14 +185,17 @@ export function ComposeRail({ config, values, update, onApplyExample, onGenerate
         <div className="tabular min-w-0 flex-1 text-[11.5px] leading-tight">
           <AnimatePresence mode="popLayout" initial={false}>
             <motion.span
-              key={blockedReason ?? formatBudget(budget)}
+              key={blockedReason ?? `${runtimeEstimate?.seconds ?? "learning"}-${budget}`}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={FADE}
               className={cx("block truncate", blockedReason ? "text-warn" : "text-faint")}
             >
-              {blockedReason ?? `Books ≈${formatBudget(budget)} of GPU`}
+              {blockedReason ??
+                (runtimeEstimate
+                  ? `ETA ≈${formatBudget(runtimeEstimate.seconds)} from ${runtimeEstimate.samples} run${runtimeEstimate.samples === 1 ? "" : "s"} · GPU booking ${formatBudget(budget)}`
+                  : `ETA learns after this preset's first run · GPU booking ${formatBudget(budget)}`)}
             </motion.span>
           </AnimatePresence>
         </div>

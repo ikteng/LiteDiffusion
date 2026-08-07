@@ -55,7 +55,11 @@ export type GeneratedVideo = {
   url: string;
   report: string;
   refinedPrompt: string;
+  /** Client-observed execution time after the queue, never the ZeroGPU reservation. */
+  runtimeSeconds: number;
 };
+
+export type RuntimeEstimate = { seconds: number; samples: number };
 
 /**
  * A finished clip, plus enough of the request to make sense of it later.
@@ -81,6 +85,10 @@ export type RunProgress = {
   progress: number | null;
   position?: number;
   eta?: number;
+  etaUpdatedAt?: number;
+  etaCountsDown?: boolean;
+  etaSamples?: number;
+  etaSource?: "queue" | "history";
   index?: number;
   length?: number;
   unit?: string;
@@ -135,7 +143,7 @@ export const FALLBACK_CONFIG: StudioConfig = {
     },
     {
       value: "Turbo 4-step — fastest, more artifacts",
-      description: "Maximum speed; expect sharper textures and more motion artifacts.",
+      description: "LightX2V v0.1 four-step preview; maximum speed with some detail loss.",
       recommended: false,
       custom: false,
       steps: 4,

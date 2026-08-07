@@ -1,4 +1,5 @@
-import { Trash2 } from "lucide-react";
+import { ChevronDown, Trash2 } from "lucide-react";
+import { Collapsible } from "@base-ui/react/collapsible";
 import { ScrollArea } from "@base-ui/react/scroll-area";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
@@ -25,14 +26,18 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
   if (items.length === 0) return null;
 
   return (
-    <section aria-label="This session's clips" className="mt-4 shrink-0">
+    <Collapsible.Root defaultOpen render={<section aria-label="This session's clips" className="mt-4 shrink-0" />}>
       <div className="mb-2 flex items-baseline gap-2">
-        <h2 className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-faint">History</h2>
+        <Collapsible.Trigger className="group flex items-center gap-1 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-faint">
+          <ChevronDown className="size-3 transition-transform duration-200 group-data-panel-open:rotate-180" />
+          History
+        </Collapsible.Trigger>
         <span className="tabular text-[11px] text-faint">
           {items.length} clip{items.length === 1 ? "" : "s"} this session
         </span>
       </div>
 
+      <Collapsible.Panel className="h-[var(--collapsible-panel-height)] overflow-hidden transition-[height] duration-200 ease-out data-starting-style:h-0 data-ending-style:h-0">
       <ScrollArea.Root>
         <ScrollArea.Viewport className="pb-2.5">
           <ScrollArea.Content className="flex gap-2">
@@ -99,6 +104,7 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
           <ScrollArea.Thumb className="h-full rounded-full bg-line-strong" />
         </ScrollArea.Scrollbar>
       </ScrollArea.Root>
-    </section>
+      </Collapsible.Panel>
+    </Collapsible.Root>
   );
 }

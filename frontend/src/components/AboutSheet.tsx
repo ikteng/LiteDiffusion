@@ -9,7 +9,7 @@ const LINKS = [
   ["Original Space", "https://huggingface.co/spaces/multimodalart/minimax-h3"],
   ["MiniMax-H3 model", "https://huggingface.co/MiniMaxAI/MiniMax-H3"],
   ["NVFP4 checkpoint", "https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4"],
-  ["Turbo LoRA", "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora"],
+  ["4-step Turbo LoRA", "https://huggingface.co/lightx2v/Minimax-h3-Turbo"],
   ["Sana / Sol-Engine", "https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3/optimized"],
 ];
 
@@ -79,12 +79,15 @@ export function AboutSheet({ open, onClose }: { open: boolean; onClose: () => vo
             <Term>Exact</Term> evaluates all 50 blocks on every scheduler step. Nothing is reused and sparse attention
             is off. It is the reference path.
           </P>
+          {/* The measurements are bound with non-breaking spaces — "35 s → 23 s." is one figure and reads as noise
+              when the line break lands inside it. Note that a JSX comment cannot go mid-paragraph: it splits the text
+              node and eats the surrounding whitespace. */}
           <P>
             <Term>Balanced</Term> is Cache-DiT block reuse. Block 0 always runs; its output residual is compared against
             the last one on a strided probe, and if the relative change is under 8% the remaining 49 blocks are skipped
             and the cached tail is replayed with a first-order Taylor correction. The first three and last two steps are
             always dense, and it will never skip more than twice in a row. Measured on a warm 960×544 / 56-frame /
-            28-step run: 20 full evaluations and 7 reuses instead of 27, denoise and decode 35 s → 23 s.
+            28-step run: 20 full evaluations and 7 reuses instead of 27, denoise and decode 35&nbsp;s&nbsp;→&nbsp;23&nbsp;s.
           </P>
           <P>
             <Term>Ultra cache</Term> forecasts the whole transformer's residual — video and audio together, so the joint
@@ -93,8 +96,8 @@ export function AboutSheet({ open, onClose }: { open: boolean; onClose: () => vo
           </P>
           <P>
             <Term>Turbo 4- and 8-step</Term> load a distilled LoRA and cut the schedule outright. They force Exact,
-            because a four-step trajectory is too short for block reuse to be safe. Both use the same adapter; only the
-            number of scheduler points differs.
+            because a few-step trajectory is too short for block reuse to be safe. The 4-step preset uses LightX2V's
+            preview FL2V Turbo adapter; the 8-step preset retains the earlier adapter and its longer schedule.
           </P>
           <P className="text-faint">
             All of this is inference-work caching, not result caching. Every prompt and seed starts from fresh latents.
@@ -104,7 +107,7 @@ export function AboutSheet({ open, onClose }: { open: boolean; onClose: () => vo
         <Part title="Things that will surprise you">
           <P>
             <Term>Lengths snap.</Term> The video VAE decodes 17n + 5 frames at 24 fps and nothing else, so a request for
-            5 s becomes 124 frames — 5.17 s. The slider shows the length you will actually get.
+            5&nbsp;s becomes 124 frames — 5.17&nbsp;s. The slider shows the length you will actually get.
           </P>
           <P>
             <Term>Times are bookings, not durations.</Term> ZeroGPU reserves a worker for a computed number of seconds

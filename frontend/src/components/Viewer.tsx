@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, Copy, CornerUpLeft, Download, Film, Sparkles, Volume2, X } from "lucide-react";
+import { AlertTriangle, Check, Clock3, Copy, CornerUpLeft, Download, Film, Sparkles, Volume2, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
 import { FADE, SETTLE } from "../lib/motion";
-import { formatClock, formatEta, parseReport, presetName } from "../lib/studio";
+import { formatBudget, formatClock, formatEta, parseReport, presetName } from "../lib/studio";
 import type { HistoryItem, RunPhase, RunProgress } from "../types";
 import { Button } from "../ui/Button";
 import { Chip, Progress } from "../ui/Controls";
@@ -122,6 +122,12 @@ function EmptyState() {
 }
 
 function RunState({ progress }: { progress: RunProgress }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!progress.etaCountsDown) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [progress.etaCountsDown]);
   const activeIndex = Math.max(
     0,
     PHASES.findIndex((phase) => phase.key === (progress.phase ?? "queue")),
@@ -129,7 +135,20 @@ function RunState({ progress }: { progress: RunProgress }) {
   const active = PHASES[activeIndex];
   const steps =
     progress.index != null && progress.length != null ? `step ${progress.index} of ${progress.length}` : null;
-  const eta = formatEta(progress.eta);
+  const remaining =
+    progress.eta == null
+      ? undefined
+      : Math.max(
+          0,
+          progress.eta - (progress.etaCountsDown ? (now - (progress.etaUpdatedAt ?? now)) / 1_000 : 0),
+        );
+  const eta = formatEta(remaining);
+  const etaLabel =
+    progress.etaSource === "history" && remaining != null
+      ? progress.etaCountsDown
+        ? `ETA ${eta ?? "finishing…"}`
+        : `Run ETA ≈${formatBudget(remaining)}`
+      : eta;
 
   return (
     <section
@@ -177,7 +196,12 @@ function RunState({ progress }: { progress: RunProgress }) {
                 ? `${progress.position + 1} ahead in the queue`
                 : progress.label)}
           </span>
-          <span className="shrink-0">{eta ?? (progress.progress != null ? `${Math.round(progress.progress * 100)}%` : "")}</span>
+          <span className="shrink-0">
+            {etaLabel ?? (progress.progress != null ? `${Math.round(progress.progress * 100)}%` : "")}
+            {progress.etaSource === "history" && progress.etaSamples
+              ? ` · ${progress.etaSamples} run${progress.etaSamples === 1 ? "" : "s"}`
+              : ""}
+          </span>
         </div>
       </div>
     </section>
@@ -211,6 +235,9 @@ function ResultToolbar({ item, onReusePrompt }: { item: HistoryItem; onReuseProm
         </Chip>
         <Chip>
           <Volume2 className="size-3" /> {formatClock(item.seconds)} with sound
+        </Chip>
+        <Chip>
+          <Clock3 className="size-3" /> ran in {formatBudget(item.runtimeSeconds)}
         </Chip>
         <Chip>{presetName(item.preset)}</Chip>
 

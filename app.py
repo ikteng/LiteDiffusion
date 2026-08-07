@@ -33,8 +33,13 @@ ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
 GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "h3-outputs")
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
-TURBO_LORA_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
-TURBO_LORA_FILE = "minimax_h3_turbo_4step_ema_ckpt850.safetensors"
+TURBO_4_LORA_REPO = "lightx2v/Minimax-h3-Turbo"
+TURBO_4_LORA_FILE = "minimax_h3_fl2v_turbo_4step_v0.1.safetensors"
+# LightX2V's reference loader uses alpha=8 for this rank-128 PEFT adapter. The custom NVFP4 branch applies the final
+# activation-space multiplier directly, so preserve PEFT's alpha/rank scale here instead of applying it 16x too hard.
+TURBO_4_LORA_SCALE = 8 / 128
+TURBO_8_LORA_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
+TURBO_8_LORA_FILE = "minimax_h3_turbo_4step_ema_ckpt850.safetensors"
 LORA_MAX_BYTES = 2 * 1024**3
 EGRID_COMMIT = "a7624b4c00626a8ae7e78860769389d706565190"
 EGRID_SHA256 = "30eb3c2cc7fb6b470d9717ff840d359313ac27cd64b705e32da1baa10f72d6a8"
@@ -348,13 +353,17 @@ def _download_egrid() -> str:
     return path
 
 
-def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, str | None, str]:
+def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, str | None, str, float]:
     """Resolve one public safetensors LoRA before ZeroGPU is booked; arbitrary code is never downloaded or run."""
     preset = str(preset or "None")
     if preset == "None":
-        return None, None, "None"
-    if preset.startswith("Turbo"):
-        repo_id, filename = TURBO_LORA_REPO, TURBO_LORA_FILE
+        return None, None, "None", 1.0
+    adapter_scale = 1.0
+    if preset == "Turbo · 4 steps":
+        repo_id, filename = TURBO_4_LORA_REPO, TURBO_4_LORA_FILE
+        adapter_scale = TURBO_4_LORA_SCALE
+    elif preset == "Turbo · 8 steps":
+        repo_id, filename = TURBO_8_LORA_REPO, TURBO_8_LORA_FILE
     else:
         repo_id, filename = str(repo_id or "").strip(), str(filename or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_id):
@@ -381,7 +390,10 @@ def resolve_lora(preset: str, repo_id: str, filename: str) -> tuple[str | None, 
         shutil.rmtree(stale.path, ignore_errors=True)
     path = hf_hub_download(repo_id=repo_id, filename=filename, token=False, local_dir=local_dir)
     os.utime(local_dir, None)
-    return path, _download_egrid(), f"{repo_id}/{filename}"
+    # Only the older pruned-base adapter contains AdaLN targets and needs its external timestep lookup grid. Custom
+    # adapters keep the grid available for backwards compatibility; loaders that do not target AdaLN simply ignore it.
+    egrid_path = None if preset == "Turbo · 4 steps" else _download_egrid()
+    return path, egrid_path, f"{repo_id}/{filename}", adapter_scale
 
 
 # Seconds of GPU one request needs, from the packed video rows it is about to denoise: linear in the rows for the
@@ -542,7 +554,7 @@ def generate(
         steps, displayed_steps = 9, 8
     else:
         steps = requested_steps
-    lora_path, egrid_path, lora_label = resolve_lora(lora_preset, lora_repo, lora_filename)
+    lora_path, egrid_path, lora_label, adapter_scale = resolve_lora(lora_preset, lora_repo, lora_filename)
     # Few-step distilled trajectories are too short to benefit safely from block reuse. Their speed comes from the
     # LoRA; keep every requested Turbo denoiser evaluation exact.
     run_acceleration = "Exact" if lora_preset.startswith("Turbo") else acceleration
@@ -616,7 +628,7 @@ def generate(
             run_acceleration,
             lora_path,
             egrid_path,
-            float(lora_strength),
+            float(lora_strength) * adapter_scale,
         )
     finally:
         LocalContext.progress.reset(progress_token)
@@ -688,7 +700,7 @@ def _fit_keyframe(image_path, current_canvas):
 PRESET_DESCRIPTIONS = {
     "Balanced — best overall (recommended)": "Full quality schedule with conservative Cache-DiT acceleration.",
     "Turbo 8-step — faster, cleaner": "Distilled eight-step path with better Turbo consistency.",
-    "Turbo 4-step — fastest, more artifacts": "Maximum speed; expect sharper textures and more motion artifacts.",
+    "Turbo 4-step — fastest, more artifacts": "LightX2V v0.1 four-step preview; maximum speed with some detail loss.",
     "Exact 28-step — maximum fidelity": "Dense reference path with approximate caching disabled.",
     "Ultra cache — experimental speed": "Aggressive forecasting on the full schedule; inspect results carefully.",
     CUSTOM_PRESET: "Expose schedule, cache engine, LoRA source, and strength controls.",

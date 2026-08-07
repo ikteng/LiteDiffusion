@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchModelStatus, fetchStudioConfig, runGeneration } from "./api";
 import { AboutSheet } from "./components/AboutSheet";
 import { ComposeRail } from "./components/ComposeRail";
@@ -7,6 +7,7 @@ import { History } from "./components/History";
 import { UsageSheet } from "./components/UsageSheet";
 import { Viewer } from "./components/Viewer";
 import { loadSpeed, saveSpeed } from "./lib/storage";
+import { estimateRuntime, loadRuntimeSamples, rememberRuntime, runtimeSampleFor } from "./lib/runtimeHistory";
 import { findCanvas, snapFrames, FPS } from "./lib/studio";
 import type { GenerationValues, HistoryItem, ModelStatus, RunProgress, StudioConfig } from "./types";
 import { FALLBACK_CONFIG } from "./types";
@@ -42,6 +43,7 @@ export default function App() {
   const [model, setModel] = useState<ModelStatus>({ ready: false, status: "Contacting the Space…", reachable: true });
   const [progress, setProgress] = useState<RunProgress>(IDLE);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [runtimeSamples, setRuntimeSamples] = useState(loadRuntimeSamples);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usageOpen, setUsageOpen] = useState(false);
@@ -51,6 +53,10 @@ export default function App() {
   const running =
     progress.stage === "connecting" || progress.stage === "queued" || progress.stage === "generating";
   const selected = history.find((item) => item.id === selectedId) ?? null;
+  const runtimeEstimate = useMemo(
+    () => estimateRuntime(runtimeSamples, config, values),
+    [runtimeSamples, config, values],
+  );
 
   useEffect(() => {
     fetchStudioConfig()
@@ -113,7 +119,8 @@ export default function App() {
     viewerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     try {
       // Canonicalize against the live config so a stale embedded bundle cannot submit a display-only resolution.
-      const result = await runGeneration({ ...values, canvas: findCanvas(config, values.canvas).label }, setProgress);
+      const requestValues = { ...values, canvas: findCanvas(config, values.canvas).label };
+      const result = await runGeneration(requestValues, setProgress, runtimeEstimate);
       const item: HistoryItem = {
         ...result,
         id: `${Date.now().toString(36)}-${history.length}`,
@@ -125,6 +132,7 @@ export default function App() {
         preset: values.preset,
       };
       setHistory((current) => [item, ...current]);
+      setRuntimeSamples((current) => rememberRuntime(current, runtimeSampleFor(config, requestValues, result.runtimeSeconds)));
       setSelectedId(item.id);
       setProgress({ stage: "complete", label: "Complete", progress: 1, exact: true });
     } catch (caught) {
@@ -162,6 +170,7 @@ export default function App() {
             onGenerate={generate}
             running={running}
             blockedReason={blockedReason}
+            runtimeEstimate={runtimeEstimate}
           />
         </div>
 

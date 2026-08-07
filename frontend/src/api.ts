@@ -1,5 +1,13 @@
 import { Client, handle_file, type StatusMessage } from "@gradio/client";
-import type { Acceleration, GeneratedVideo, GenerationValues, PresetOption, RunProgress, StudioConfig } from "./types";
+import type {
+  Acceleration,
+  GeneratedVideo,
+  GenerationValues,
+  PresetOption,
+  RunProgress,
+  RuntimeEstimate,
+  StudioConfig,
+} from "./types";
 import { FALLBACK_CONFIG } from "./types";
 
 type FilePayload = { url?: string; path?: string; name?: string; data?: string };
@@ -52,6 +60,9 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
       progress: null,
       position,
       eta: message.eta,
+      etaUpdatedAt: Date.now(),
+      etaCountsDown: false,
+      etaSource: "queue",
       exact: false,
       phase: "queue",
     };
@@ -140,9 +151,21 @@ function unwrapServerOutput(payload: unknown[]): unknown[] {
 export async function runGeneration(
   values: GenerationValues,
   onProgress: (progress: RunProgress) => void,
+  runtimeEstimate: RuntimeEstimate | null = null,
 ): Promise<GeneratedVideo> {
-  onProgress({ stage: "connecting", label: "Connecting to the generator", progress: null, exact: false });
+  onProgress({
+    stage: "connecting",
+    label: "Connecting to the generator",
+    progress: null,
+    exact: false,
+    eta: runtimeEstimate?.seconds,
+    etaUpdatedAt: Date.now(),
+    etaCountsDown: false,
+    etaSamples: runtimeEstimate?.samples,
+    etaSource: runtimeEstimate ? "history" : undefined,
+  });
   const startedAt = Date.now();
+  let runtimeStartedAt: number | null = null;
   const client = await getClient();
   const submission = client.submit("/generate", {
     prompt: values.prompt,
@@ -171,6 +194,23 @@ export async function runGeneration(
   for await (const event of submission) {
     if (event.type === "status") {
       const next = statusLabel(event, startedAt, latestProgress);
+      if (next.stage === "generating" && next.phase !== "queue") {
+        runtimeStartedAt ??= Date.now();
+        if (runtimeEstimate) {
+          next.eta = Math.max(0, runtimeEstimate.seconds - (Date.now() - runtimeStartedAt) / 1000);
+          next.etaUpdatedAt = Date.now();
+          next.etaCountsDown = true;
+          next.etaSamples = runtimeEstimate.samples;
+          next.etaSource = "history";
+        }
+      } else if (runtimeEstimate && next.stage === "queued") {
+        // Queue ETA describes worker availability. Keep the learned generation ETA separate and frozen until work starts.
+        next.eta = runtimeEstimate.seconds;
+        next.etaUpdatedAt = Date.now();
+        next.etaCountsDown = false;
+        next.etaSamples = runtimeEstimate.samples;
+        next.etaSource = "history";
+      }
       latestProgress = next;
       onProgress(next);
       if (next.stage === "error") throw new Error(next.label);
@@ -186,5 +226,6 @@ export async function runGeneration(
     url: outputUrl(result[0] as FilePayload | string),
     report: String(result[1] ?? ""),
     refinedPrompt: String(result[2] ?? ""),
+    runtimeSeconds: (Date.now() - (runtimeStartedAt ?? startedAt)) / 1000,
   };
 }

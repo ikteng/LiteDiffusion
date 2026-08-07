@@ -16,11 +16,11 @@ and `/gradio_api` to `127.0.0.1:7860`. With no Python server running it falls ba
 
 ## Shape of the UI
 
-Two panes: **compose on the left, watch on the right.** The left rail is the whole request — prompt, keyframes, format,
-length, speed, seed — as one scrolling stack of `Section`s with a sticky action bar pinned to its foot showing what the
+Two panes: **compose on the left, watch on the right.** The left rail is the whole request — speed, prompt, keyframes,
+format, length, seed — as one scrolling stack of `Section`s with a sticky action bar pinned to its foot showing what the
 run will cost and the Generate button. The right pane is the player, its result toolbar, and the session's history
-filmstrip. Nothing is hidden behind a disclosure except manual scheduler and LoRA control, which is an escape from the
-presets rather than a setting.
+filmstrip. Rail sections and the history strip are collapsible; manual scheduler and LoRA control remain nested under
+Advanced because they are an escape from the presets rather than another ordinary setting.
 
 Below `lg` the grid collapses to one column and the two panes stack: rail on top, viewer beneath. That is the only
 structural change — no separate mobile components, no drawer. `App.tsx` is `lg:h-dvh lg:overflow-hidden` so on a desktop
@@ -35,6 +35,26 @@ Speed is a single *faster → smarter* axis rather than a list of presets, becau
 `presetAxis` sorts them by scheduler steps and then by how much of the schedule the cache engine skips, both of which
 come from `/studio-config`. A preset added on the server therefore lands in the right place with no table to update
 here. Manual control is not a point on that axis, so it lives under Advanced and disables the slider while it is on.
+
+Speed sits at the top of the rail and is the one section with `tone="accent"`, because it is the only setting that
+decides how long you wait — and the only one someone who never scrolls past the prompt would otherwise never find. The
+treatment is deliberately scarce: a second accented section would make both of them ordinary. Its title row carries a
+one-press shortcut to the fastest preset, computed by `fasterOption` in `settings.tsx`, which returns `null` when the
+user is already on the fastest preset, when manual controls are in effect, or when the saving is under 30 s — so the
+button can never decay into one people learn to ignore.
+
+`src/lib/storage.ts` persists the speed group (`preset`, `steps`, `acceleration` and the four LoRA fields) to
+`localStorage` under `minimax-h3.speed.v1`, written on change rather than on generate. Speed is the only thing
+persisted, because it describes the person rather than the shot; prompt, seed, keyframes and canvas are properties of
+*this* clip. Two hazards it handles: a Space renders in a cross-origin iframe, so `window.localStorage` can throw a
+`SecurityError` on the *property access itself* when third-party storage is blocked — hence the accessor is wrapped, not
+just the read — and every field is shape-checked on load, so a corrupt or hand-edited blob degrades to the defaults
+rather than taking the app down. A remembered preset that the server no longer offers is dropped by an effect in
+`App.tsx`, which is the only place that knows today's preset list.
+
+`src/lib/runtimeHistory.ts` retains up to 60 completed post-queue runtimes in the same browser. ETA uses only matching
+presets, weights nearby workloads more heavily, and scales observations for canvas, frame count and keyframes. It never
+uses the ZeroGPU reservation as elapsed time; the quota booking remains a separate, explicitly labelled figure.
 
 There is exactly one slider component, `ui/Slider.tsx`. Duration, preset, scheduler steps and LoRA strength are all the
 same instrument; passing `stops` is the only difference, and it adds dots on the track and screen-reader names for each
@@ -67,12 +87,17 @@ Base UI's `[data-starting-style]` / `[data-ending-style]` / `[data-open]` / `[da
 
 - `src/App.tsx` — the two-pane shell, generation state, session history, and `/status` polling
 - `src/components/ComposeRail.tsx` — the left pane: prompt, examples, every settings section, the sticky action bar
-- `src/components/settings.tsx` — the body of each section, plus `budgetFor`
+- `src/components/settings.tsx` — the body of each section, plus `budgetFor` and `fasterOption`
 - `src/components/Viewer.tsx` — the player and its empty, running, error and result states
 - `src/components/History.tsx` — the session filmstrip
-- `src/components/Header.tsx`, `UsageSheet.tsx`, `AboutSheet.tsx`, `KeyframeSlot.tsx`
+- `src/components/Header.tsx`, `UsageSheet.tsx`, `KeyframeSlot.tsx`
+- `src/components/AboutSheet.tsx` — the technical note behind the ⓘ button: the pipeline, the quantization figures, what
+  each preset actually changes, the four behaviours that surprise people. Every number in it is read off `app.py`,
+  `h3_nvfp4.py` and `h3_local_conditioner.py`; if those change, this changes with them
 - `src/ui/` — the primitives over Base UI: `Button`, `Slider`, `Segmented`, `Controls`, `Section`, `Popover`, `Sheet`,
   `Tip`
+- `src/lib/storage.ts` — the remembered speed group and its validated `localStorage` access
+- `src/lib/runtimeHistory.ts` — validated wall-clock samples and the per-preset ETA estimator
 - `src/lib/motion.ts` — the three shared transitions
 - `src/lib/studio.ts` — derived values: frame snapping, GPU-second estimates, canvas grouping, formatting
 - `src/styles.css` — the `@theme` token block, the focus ring, and the indeterminate sweep
@@ -80,8 +105,9 @@ Base UI's `[data-starting-style]` / `[data-ending-style]` / `[data-open]` / `[da
 
 ## Two things that must stay in sync with `app.py`
 
-- `estimateGpuSeconds` in `src/lib/studio.ts` mirrors `get_duration`. It is what the action bar's "books ≈…" readout and
-  the Speed section's cost report, so a change to the Python timing constants has to be copied here.
-- `snapFrames` encodes the video VAE's `17n + 5` rule at 24 fps. It is why a requested 5 s clip is announced as 5.04 s.
+- `estimateGpuSeconds` in `src/lib/studio.ts` mirrors `get_duration`. It feeds the separately labelled GPU-booking
+  readouts and the saving named on the faster-preset shortcut, so a change to the Python timing constants has to be
+  copied here or those quota figures will not match what the server honours.
+- `snapFrames` encodes the video VAE's `17n + 5` rule at 24 fps. It is why a requested 5 s clip is announced as 5.17 s.
 
 Run `npm run build` after visual changes. The checked-in `dist/` bundle is what the Gradio Space serves.
