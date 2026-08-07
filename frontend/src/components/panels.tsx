@@ -1,10 +1,12 @@
-import { Dices } from "lucide-react";
+import { useRef, useState } from "react";
+import { ChevronDown, Dices } from "lucide-react";
 import {
   estimateGpuSeconds,
   findCanvas,
   formatBudget,
   formatClock,
   groupCanvases,
+  presetAxis,
   presetName,
   presetTagline,
   randomSeed,
@@ -14,8 +16,8 @@ import {
 import { cx } from "../lib/cx";
 import type { Acceleration, GenerationValues, LoraPreset, StudioConfig } from "../types";
 import { Button } from "../ui/Button";
-import { Field, Slider, TextInput } from "../ui/Controls";
-import { OptionList } from "../ui/OptionList";
+import { Field, Slider, Switch, TextInput } from "../ui/Controls";
+import { NotchSlider } from "../ui/NotchSlider";
 import { Segmented } from "../ui/Segmented";
 import { KeyframeSlot } from "./KeyframeSlot";
 
@@ -45,31 +47,94 @@ function sentence(text: string): string {
   return `${text[0].toUpperCase()}${text.slice(1)}${/[.!?]$/.test(text) ? "" : "."}`;
 }
 
+/**
+ * The presets as one axis rather than a list of paragraphs.
+ *
+ * They are genuinely ordered — `presetAxis` derives that order from each preset's step count and cache engine — so a
+ * slider says "a little faster than the default" in one gesture, where six radio rows made you read all six. What is
+ * *not* on the axis lives under Advanced: manual control, which is an escape from the presets rather than a point
+ * along them.
+ */
 export function SpeedPanel({ config, values, update }: PanelProps) {
-  const options = config.presets.map((preset) => ({
-    value: preset.value,
-    title: presetName(preset.value),
-    // The tagline is the tail of an em-dashed label ("… — best overall"), so it needs a capital to open a sentence.
-    description: preset.custom ? preset.description : `${sentence(presetTagline(preset.value))} ${preset.description}`,
-    badge: preset.recommended ? "recommended" : undefined,
-    meta: preset.custom ? undefined : formatBudget(budgetFor(config, values, preset.steps)),
-  }));
+  const axis = presetAxis(config.presets);
+  const custom = config.presets.find((preset) => preset.custom);
+  const manual = custom != null && values.preset === custom.value;
+  const [advanced, setAdvanced] = useState(manual);
+
+  // While manual controls are in effect the axis has no position, so hold the thumb at the last preset the user chose.
+  const lastOnAxis = useRef(Math.max(0, axis.findIndex((preset) => preset.recommended)));
+  const index = axis.findIndex((preset) => preset.value === values.preset);
+  if (index >= 0) lastOnAxis.current = index;
+  const shown = index >= 0 ? index : lastOnAxis.current;
+  const current = axis[shown];
+
+  const steps = manual ? values.steps : current.steps;
+  const budget = formatBudget(budgetFor(config, values, steps));
 
   return (
     <div className="flex flex-col gap-3">
-      <OptionList
+      <NotchSlider
         ariaLabel="Generation preset"
-        value={values.preset}
-        options={options}
-        onChange={(value) => update("preset", value)}
-        renderExtra={(value) =>
-          config.presets.find((preset) => preset.value === value)?.custom ? (
-            <CustomPresetControls values={values} update={update} />
-          ) : null
-        }
+        minLabel="Faster"
+        maxLabel="Smarter"
+        stops={axis.map((preset) => presetName(preset.value))}
+        index={shown}
+        disabled={manual}
+        onChange={(next) => update("preset", axis[next].value)}
       />
-      <p className="border-t border-line pt-2.5 text-[11px] leading-[1.5] text-faint">
-        Times are the ZeroGPU allocation each run books, not a promise of wall-clock speed.
+
+      <div className="rounded-lg bg-sunken px-3 py-2.5">
+        <p className="flex items-baseline gap-2">
+          <span className="text-[13.5px] font-medium text-ink">
+            {manual ? "Manual" : presetName(current.value)}
+          </span>
+          {!manual && current.recommended && (
+            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.06em] text-accent">
+              recommended
+            </span>
+          )}
+          <span className="tabular ml-auto shrink-0 text-[12px] text-muted">{budget}</span>
+        </p>
+        {/* In manual mode the controls themselves are two rows below, so restating them here would only add noise. */}
+        {!manual && (
+          <p className="mt-1 text-[12px] leading-[1.5] text-muted">
+            {sentence(presetTagline(current.value))} {current.description}
+          </p>
+        )}
+        <p className="tabular mt-1.5 text-[11px] text-faint">
+          {steps} steps · {manual ? values.acceleration : current.acceleration} cache · books the GPU for {budget}
+        </p>
+      </div>
+
+      {custom && (
+        <div className="border-t border-line pt-2.5">
+          <button
+            type="button"
+            aria-expanded={advanced}
+            onClick={() => setAdvanced((open) => !open)}
+            className="flex w-full items-center gap-1.5 text-[12px] text-muted transition-colors duration-100 hover:text-ink"
+          >
+            Advanced
+            <ChevronDown className={cx("size-3.5 transition-transform duration-150", advanced && "rotate-180")} />
+          </button>
+
+          {advanced && (
+            <div className="mt-3 flex flex-col gap-3">
+              <Switch
+                checked={manual}
+                onChange={(next) => update("preset", next ? custom.value : axis[lastOnAxis.current].value)}
+                label="Manual controls"
+                description="Set the schedule, cache engine and LoRA yourself instead of using a preset."
+              />
+              {manual && <CustomPresetControls values={values} update={update} />}
+            </div>
+          )}
+        </div>
+      )}
+
+      <p className="text-[11px] leading-[1.5] text-faint">
+        Times are the ZeroGPU allocation each run books, not a promise of wall-clock speed — a lighter cache engine
+        finishes sooner without booking less.
       </p>
     </div>
   );

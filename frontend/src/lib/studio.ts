@@ -1,4 +1,4 @@
-import type { CanvasOption, PresetOption, StudioConfig } from "../types";
+import type { Acceleration, CanvasOption, PresetOption, StudioConfig } from "../types";
 
 /** Mirrors `FPS`, `FRAMES_PER_CHUNK`, `LATENTS_PER_CHUNK` in app.py. */
 export const FPS = 24;
@@ -124,6 +124,25 @@ export function findCanvas(config: StudioConfig, label: string): CanvasOption {
 
 export function findPreset(config: StudioConfig, value: string): PresetOption {
   return config.presets.find((preset) => preset.value === value) ?? config.presets[0];
+}
+
+/** How much of the schedule each cache engine actually evaluates, least to most. */
+const ACCELERATION_RANK: Record<Acceleration, number> = { "Ultra Fast": 0, Balanced: 1, Exact: 2 };
+
+/**
+ * The presets ordered along the one axis they vary on: how much computation the run really performs.
+ *
+ * More scheduler steps is smarter; at equal steps, less approximate caching is smarter. Both numbers come from
+ * `/studio-config`, so a preset added on the server lands in the right place without a table to maintain here.
+ * `Custom` is excluded — it is not a point on the axis but an escape from it.
+ */
+export function presetAxis(presets: PresetOption[]): PresetOption[] {
+  return presets
+    .filter((preset) => !preset.custom)
+    .slice()
+    .sort(
+      (a, b) => a.steps - b.steps || ACCELERATION_RANK[a.acceleration] - ACCELERATION_RANK[b.acceleration],
+    );
 }
 
 /** `"Balanced — best overall (recommended)"` → `"Balanced"`. The em dash tail is a tagline, not part of the name. */

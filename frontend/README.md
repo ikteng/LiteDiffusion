@@ -20,6 +20,11 @@ Generate button; the settings that persist between shots — speed, format, leng
 pill opens the same `Popover`: an anchored panel from `sm` up, a bottom sheet below it. The stage under the composer
 reserves the aspect ratio of the clip that is coming, so nothing moves when the video arrives.
 
+Speed is a single *faster → smarter* axis rather than a list of presets, because the presets really are ordered:
+`presetAxis` sorts them by scheduler steps and then by how much of the schedule the cache engine skips, both of which
+come from `/studio-config`. A preset added on the server therefore lands in the right place with no table to update
+here. Manual control is not a point on that axis, so it lives under Advanced and disables the slider while it is on.
+
 ## Handoff map
 
 - `src/App.tsx` — page composition, generation state, and `/status` polling
@@ -28,7 +33,7 @@ reserves the aspect ratio of the clip that is coming, so nothing moves when the 
 - `src/components/ControlPill.tsx` — the shape every setting takes
 - `src/components/Stage.tsx` — run phases, result, and error states
 - `src/components/Header.tsx`, `UsageSheet.tsx`, `AboutSheet.tsx`, `KeyframeSlot.tsx`
-- `src/ui/` — the primitives: `Button`, `Popover`, `Sheet`, `Segmented`, `OptionList`, `Controls`
+- `src/ui/` — the primitives: `Button`, `Popover`, `Sheet`, `Segmented`, `NotchSlider`, `Controls`
 - `src/lib/studio.ts` — derived values: frame snapping, GPU-second estimates, canvas grouping, formatting
 - `src/styles.css` — the `@theme` token block, the slider, and two keyframes
 - `src/api.ts` — isolated Gradio client adapter and progress-event mapping

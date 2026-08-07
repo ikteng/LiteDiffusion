@@ -145,6 +145,80 @@
   transform: scale(1.15);
 }
 
+/*
+ * The discrete "faster — smarter" track: one stop per preset, drawn as a filled capsule.
+ *
+ * Still a native range input, so dragging, arrow keys, Home/End and the value announcement all come for free. The
+ * unfilled capsule and the stop dots are drawn by the wrapper underneath; the track paints only the accent fill, up
+ * to the thumb's centre — hence the `calc` that mirrors how far a thumb actually travels.
+ */
+.notch {
+  --notch-height: 30px;
+  --notch-thumb: 24px;
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  width: 100%;
+  height: var(--notch-height);
+  background: transparent;
+  cursor: pointer;
+}
+
+.notch::-webkit-slider-runnable-track {
+  height: var(--notch-height);
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0%,
+    var(--color-accent) var(--fill, 0px),
+    transparent var(--fill, 0px),
+    transparent 100%
+  );
+}
+
+.notch::-moz-range-track {
+  height: var(--notch-height);
+  border-radius: 999px;
+  background: transparent;
+}
+
+/* Firefox fills to the thumb centre by itself, so it needs no `--fill`. */
+.notch::-moz-range-progress {
+  height: var(--notch-height);
+  border-radius: 999px;
+  background: var(--color-accent);
+}
+
+.notch::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: var(--notch-thumb);
+  height: var(--notch-thumb);
+  margin-top: calc((var(--notch-height) - var(--notch-thumb)) / 2);
+  border-radius: 999px;
+  border: none;
+  background: var(--color-ink);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.55);
+  transition: transform 120ms ease;
+}
+
+.notch::-moz-range-thumb {
+  width: var(--notch-thumb);
+  height: var(--notch-thumb);
+  border-radius: 999px;
+  border: none;
+  background: var(--color-ink);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.55);
+}
+
+.notch:active::-webkit-slider-thumb {
+  transform: scale(1.06);
+}
+
+.notch:disabled {
+  cursor: not-allowed;
+}
+
 @keyframes sweep {
   0% {
     transform: translateX(-100%);
