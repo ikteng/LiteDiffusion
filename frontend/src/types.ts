@@ -57,6 +57,10 @@ export type RunProgress = {
   progress: number | null;
   position?: number;
   eta?: number;
+  index?: number;
+  length?: number;
+  unit?: string;
+  exact?: boolean;
 };
 
 export const FALLBACK_CONFIG: StudioConfig = {

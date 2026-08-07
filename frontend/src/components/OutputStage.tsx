@@ -14,6 +14,15 @@ function formatEta(seconds?: number) {
   return seconds < 60 ? `~${Math.ceil(seconds)} sec` : `~${Math.ceil(seconds / 60)} min`;
 }
 
+function progressDetail(progress: RunProgress) {
+  if (progress.stage === "queued") return "In queue";
+  if (progress.index != null && progress.length != null) {
+    return `${progress.index} / ${progress.length}${progress.unit ? ` ${progress.unit}` : ""}`;
+  }
+  if (progress.progress != null && progress.exact) return `${Math.round(progress.progress * 100)}%`;
+  return progress.label;
+}
+
 export function OutputStage({ video, progress, error, onReset }: Props) {
   const running = ["connecting", "queued", "generating"].includes(progress.stage);
 
@@ -35,13 +44,18 @@ export function OutputStage({ video, progress, error, onReset }: Props) {
               </p>
               <div className="mt-7 h-1 w-full max-w-md overflow-hidden rounded-full bg-default/10">
                 <span
+                  role="progressbar"
+                  aria-label={progress.label}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progress.progress == null ? undefined : Math.round(progress.progress * 100)}
                   className={`block h-full rounded-full bg-accent transition-all ${progress.progress == null ? "w-1/3 animate-pulse" : ""}`}
                   style={progress.progress == null ? undefined : { width: `${Math.max(4, progress.progress * 100)}%` }}
                 />
               </div>
               <div className="mt-2 flex w-full max-w-md justify-between text-xs text-muted">
-                <span>{progress.stage === "queued" ? "In queue" : "Processing"}</span>
-                <span>{formatEta(progress.eta) ?? "Timing varies by canvas"}</span>
+                <span className="max-w-[70%] truncate" title={progressDetail(progress)}>{progressDetail(progress)}</span>
+                <span>{formatEta(progress.eta) ?? (progress.progress != null ? `${Math.round(progress.progress * 100)}%` : "Live progress")}</span>
               </div>
             </div>
           ) : video ? (

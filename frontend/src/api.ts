@@ -1,7 +1,7 @@
 import { Client, handle_file, type StatusMessage } from "@gradio/client";
 import type { GeneratedVideo, GenerationValues, RunProgress, StudioConfig } from "./types";
 
-type FilePayload = { url?: string; path?: string; name?: string };
+type FilePayload = { url?: string; path?: string; name?: string; data?: string };
 
 let clientPromise: Promise<Client> | null = null;
 
@@ -22,8 +22,11 @@ export async function fetchModelStatus(): Promise<{ ready: boolean; status: stri
   return response.json() as Promise<{ ready: boolean; status: string }>;
 }
 
-function statusLabel(message: StatusMessage): RunProgress {
-  const progressItem = message.progress_data?.at(-1);
+function statusLabel(message: StatusMessage, startedAt: number): RunProgress {
+  const items = message.progress_data ?? [];
+  const progressItem = [...items].reverse().find(
+    (item) => item.desc || item.progress != null || (item.index != null && item.length != null),
+  );
   if (message.stage === "pending") {
     const position = message.position;
     return {
@@ -32,37 +35,64 @@ function statusLabel(message: StatusMessage): RunProgress {
       progress: null,
       position,
       eta: message.eta,
+      exact: false,
     };
   }
   if (message.stage === "generating" || message.stage === "streaming") {
+    let fraction = progressItem?.progress ?? null;
+    if (fraction == null && progressItem?.index != null && progressItem.length) {
+      fraction = progressItem.index / progressItem.length;
+    }
+    const exact = fraction != null;
+    if (fraction == null && message.eta != null && message.eta > 0) {
+      const elapsed = (Date.now() - startedAt) / 1000;
+      fraction = elapsed / (elapsed + message.eta);
+    }
+    if (fraction != null) fraction = Math.max(0, Math.min(1, fraction));
     return {
       stage: "generating",
       label: progressItem?.desc || "Generating video and sound",
-      progress: progressItem?.progress ?? null,
+      progress: fraction,
       eta: message.eta,
+      index: progressItem?.index ?? undefined,
+      length: progressItem?.length ?? undefined,
+      unit: progressItem?.unit ?? undefined,
+      exact,
     };
   }
   if (message.stage === "complete") {
-    return { stage: "complete", label: "Generation complete", progress: 1 };
+    return { stage: "complete", label: "Generation complete", progress: 1, exact: true };
   }
   if (message.stage === "error") {
     const detail = typeof message.message === "string" ? message.message : "Generation failed.";
-    return { stage: "error", label: detail, progress: null };
+    return { stage: "error", label: detail, progress: null, exact: false };
   }
-  return { stage: "connecting", label: "Connecting to the generator", progress: null };
+  return { stage: "connecting", label: "Connecting to the generator", progress: null, exact: false };
 }
 
-function outputUrl(file: FilePayload): string {
+function outputUrl(file: FilePayload | string): string {
+  if (typeof file === "string") {
+    if (/^(https?:|blob:|data:)/.test(file)) return file;
+    return `/gradio_api/file=${encodeURIComponent(file)}`;
+  }
   if (file.url) return file.url;
+  if (file.data) return file.data;
   if (file.path) return `/gradio_api/file=${encodeURIComponent(file.path)}`;
   throw new Error("Generation completed without a playable video URL.");
+}
+
+function unwrapServerOutput(payload: unknown[]): unknown[] {
+  let output = payload;
+  while (output.length === 1 && Array.isArray(output[0])) output = output[0];
+  return output;
 }
 
 export async function runGeneration(
   values: GenerationValues,
   onProgress: (progress: RunProgress) => void,
 ): Promise<GeneratedVideo> {
-  onProgress({ stage: "connecting", label: "Connecting to the generator", progress: null });
+  onProgress({ stage: "connecting", label: "Connecting to the generator", progress: null, exact: false });
+  const startedAt = Date.now();
   const client = await getClient();
   const submission = client.submit("/generate", {
     prompt: values.prompt,
@@ -84,17 +114,19 @@ export async function runGeneration(
   let result: unknown[] | null = null;
   for await (const event of submission) {
     if (event.type === "status") {
-      const next = statusLabel(event);
+      const next = statusLabel(event, startedAt);
       onProgress(next);
       if (next.stage === "error") throw new Error(next.label);
     } else if (event.type === "data") {
-      result = event.data as unknown[];
+      result = Array.isArray(event.data) ? event.data : [event.data];
     }
   }
 
-  if (!result || result.length < 3) throw new Error("The generator returned an incomplete response.");
+  if (!result) throw new Error("The generator finished without returning a result.");
+  result = unwrapServerOutput(result);
+  if (result.length < 3) throw new Error("The generator returned an incomplete response.");
   return {
-    url: outputUrl(result[0] as FilePayload),
+    url: outputUrl(result[0] as FilePayload | string),
     report: String(result[1] ?? ""),
     refinedPrompt: String(result[2] ?? ""),
   };
