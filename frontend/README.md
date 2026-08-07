@@ -19,8 +19,8 @@ and `/gradio_api` to `127.0.0.1:7860`. With no Python server running it falls ba
 Two panes: **compose on the left, watch on the right.** The left rail is the whole request — speed, prompt, keyframes,
 format, length, seed — as one scrolling stack of `Section`s with a sticky action bar pinned to its foot showing what the
 run will cost and the Generate button. The right pane is the player, its result toolbar, and the browser's saved history
-filmstrip. Finished MP4s and their metadata are restored from bounded IndexedDB storage, and playback uses Vidstack's
-React player. Rail sections and the history strip are collapsible; manual scheduler and LoRA control remain nested under
+filmstrip. Finished MP4s and their metadata are restored from bounded IndexedDB storage. Rail sections and the history
+strip are collapsible; manual scheduler and LoRA control remain nested under
 Advanced because they are an escape from the presets rather than another ordinary setting.
 
 Below `lg` the grid collapses to one column and the two panes stack: rail on top, viewer beneath. That is the only
