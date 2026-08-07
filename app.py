@@ -700,7 +700,7 @@ def generate_api(
     lora_filename: str = "",
     lora_strength: float = 1.0,
     generation_preset: str = DEFAULT_PRESET,
-    progress=gr.Progress(track_tqdm=True),
+    progress: gr.Progress = gr.Progress(track_tqdm=True),
     request: Request = None,
 ) -> tuple[FileData, str, str]:
     """Queued generation endpoint used by both the React studio and ordinary gradio_client callers."""
