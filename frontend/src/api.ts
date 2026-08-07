@@ -1,4 +1,4 @@
-import { Client, handle_file, type StatusMessage } from "@gradio/client";
+import type { Client, StatusMessage } from "@gradio/client";
 import type {
   Acceleration,
   GeneratedVideo,
@@ -15,7 +15,9 @@ type FilePayload = { url?: string; path?: string; name?: string; data?: string }
 let clientPromise: Promise<Client> | null = null;
 
 function getClient() {
-  clientPromise ??= Client.connect(window.location.origin, { events: ["data", "status"] });
+  clientPromise ??= import("@gradio/client").then(({ Client }) =>
+    Client.connect(window.location.origin, { events: ["data", "status"] }),
+  );
   return clientPromise;
 }
 
@@ -166,6 +168,7 @@ export async function runGeneration(
   });
   const startedAt = Date.now();
   let runtimeStartedAt: number | null = null;
+  const { handle_file } = await import("@gradio/client");
   const client = await getClient();
   const submission = client.submit("/generate", {
     prompt: values.prompt,

@@ -10,6 +10,7 @@ import { loadSpeed, saveSpeed } from "./lib/storage";
 import { deleteHistoryItem, restoreHistory, saveHistoryItem } from "./lib/history";
 import { estimateRuntime, loadRuntimeSamples, rememberRuntime, runtimeSampleFor } from "./lib/runtimeHistory";
 import { findCanvas, snapFrames, FPS } from "./lib/studio";
+import { draftValues, finalFrameFile, finalValues, recipeFrom, remixValues, valuesFromHistory } from "./lib/workflows";
 import type { GenerationValues, HistoryItem, ModelStatus, RunProgress, StudioConfig } from "./types";
 import { FALLBACK_CONFIG } from "./types";
 
@@ -131,24 +132,28 @@ export default function App() {
     setValues((current) => ({ ...current, prompt, canvas }));
   }, []);
 
-  async function generate() {
-    if (!values.prompt.trim() || running) return;
+  async function generate(requestedValues: GenerationValues = values) {
+    if (!requestedValues.prompt.trim() || running) return;
     setError(null);
     // On a phone the viewer is below the rail; bring it up rather than leaving the run happening off-screen.
     viewerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     try {
       // Canonicalize against the live config so a stale embedded bundle cannot submit a display-only resolution.
-      const requestValues = { ...values, canvas: findCanvas(config, values.canvas).label };
-      const result = await runGeneration(requestValues, setProgress, runtimeEstimate);
+      const requestValues = { ...requestedValues, canvas: findCanvas(config, requestedValues.canvas).label };
+      const requestEstimate = estimateRuntime(runtimeSamples, config, requestValues);
+      const result = await runGeneration(requestValues, setProgress, requestEstimate);
       const item: HistoryItem = {
         ...result,
-        id: `${Date.now().toString(36)}-${history.length}`,
+        id: globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
         createdAt: Date.now(),
-        prompt: values.prompt,
-        canvas: findCanvas(config, values.canvas),
-        seconds: snapFrames(values.duration) / FPS,
-        seed: values.seed,
-        preset: values.preset,
+        prompt: requestValues.prompt,
+        canvas: findCanvas(config, requestValues.canvas),
+        seconds: snapFrames(requestValues.duration) / FPS,
+        seed: requestValues.seed,
+        preset: requestValues.preset,
+        recipe: recipeFrom(requestValues),
+        sourceImage: requestValues.image,
+        sourceLastImage: requestValues.lastImage,
       };
       setHistory((current) => [item, ...current]);
       // The UI can show the result immediately; durable browser storage continues without delaying completion.
@@ -160,6 +165,28 @@ export default function App() {
       const message = caught instanceof Error ? caught.message : "Generation failed. Please try again.";
       setError(message);
       setProgress({ stage: "error", label: message, progress: null });
+    }
+  }
+
+  function remix(item: HistoryItem) {
+    setValues(remixValues(item, config));
+    setError(null);
+  }
+
+  async function continueFrom(item: HistoryItem) {
+    if (running) return;
+    setError(null);
+    try {
+      const frame = await finalFrameFile(item.url);
+      setValues({
+        ...valuesFromHistory(item, config),
+        image: frame,
+        lastImage: null,
+        seed: Math.floor(Math.random() * 2 ** 31),
+      });
+      viewerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not capture the final frame.");
     }
   }
 
@@ -189,7 +216,8 @@ export default function App() {
             values={values}
             update={update}
             onApplyExample={applyExample}
-            onGenerate={generate}
+            onGenerate={() => void generate()}
+            onGenerateDraft={() => void generate(draftValues(values, config))}
             running={running}
             blockedReason={blockedReason}
             runtimeEstimate={runtimeEstimate}
@@ -209,9 +237,10 @@ export default function App() {
               setError(null);
               setProgress(IDLE);
             }}
-            onReusePrompt={(item) =>
-              setValues((current) => ({ ...current, prompt: item.prompt, seed: item.seed }))
-            }
+            onReusePrompt={(item) => setValues(valuesFromHistory(item, config))}
+            onRenderFinal={(item) => void generate(finalValues(item, config))}
+            onContinue={(item) => void continueFrom(item)}
+            onRemix={remix}
           />
           <History
             items={history}

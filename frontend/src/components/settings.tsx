@@ -428,20 +428,20 @@ export function KeyframeSettings({ values, update }: Omit<SettingsProps, "config
       <div className="grid grid-cols-2 gap-2">
         <KeyframeSlot
           label="First frame"
-          hint="Start here"
+          hint="Start here · click or drop"
           file={values.image}
           onChange={(file) => update("image", file)}
         />
         <KeyframeSlot
           label="Last frame"
-          hint="End here"
+          hint="End here · click or drop"
           file={values.lastImage}
           onChange={(file) => update("lastImage", file)}
         />
       </div>
       <p className="text-[11px] leading-[1.5] text-faint">
-        Optional. Give one frame to animate from it, or both to interpolate between them. Images are cover-cropped to
-        the selected aspect ratio.
+        Anchor the opening, the ending, or both. One reference animates outward; two create a controlled transition.
+        Continue from any generated clip with its toolbar. Images are cover-cropped to the selected aspect ratio.
       </p>
     </div>
   );

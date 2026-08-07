@@ -1,5 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, Clock3, Copy, CornerUpLeft, Download, Film, Sparkles, Volume2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Clock3,
+  Copy,
+  CornerUpLeft,
+  Download,
+  Film,
+  RefreshCw,
+  Sparkles,
+  StepForward,
+  Volume2,
+  WandSparkles,
+  X,
+} from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
 import { FADE, SETTLE } from "../lib/motion";
@@ -30,6 +44,9 @@ type Props = {
   error: string | null;
   onDismissError: () => void;
   onReusePrompt: (item: HistoryItem) => void;
+  onRenderFinal: (item: HistoryItem) => void;
+  onContinue: (item: HistoryItem) => void;
+  onRemix: (item: HistoryItem) => void;
   className?: string;
 };
 
@@ -40,7 +57,18 @@ type Props = {
  * resizes to each clip's aspect ratio. That is what stops the whole right-hand pane from resizing every time you click
  * a 9:16 clip in a history of 16:9 ones.
  */
-export function Viewer({ item, progress, running, error, onDismissError, onReusePrompt, className }: Props) {
+export function Viewer({
+  item,
+  progress,
+  running,
+  error,
+  onDismissError,
+  onReusePrompt,
+  onRenderFinal,
+  onContinue,
+  onRemix,
+  className,
+}: Props) {
   const showing = error ? "error" : running ? "run" : item ? "result" : "empty";
 
   return (
@@ -77,7 +105,13 @@ export function Viewer({ item, progress, running, error, onDismissError, onReuse
             transition={FADE}
             className="shrink-0"
           >
-            <ResultToolbar item={item} onReusePrompt={onReusePrompt} />
+            <ResultToolbar
+              item={item}
+              onReusePrompt={onReusePrompt}
+              onRenderFinal={onRenderFinal}
+              onContinue={onContinue}
+              onRemix={onRemix}
+            />
           </motion.div>
         )}
       </AnimatePresence>
@@ -222,7 +256,19 @@ function ErrorState({ message, onDismiss }: { message: string; onDismiss: () => 
   );
 }
 
-function ResultToolbar({ item, onReusePrompt }: { item: HistoryItem; onReusePrompt: (item: HistoryItem) => void }) {
+function ResultToolbar({
+  item,
+  onReusePrompt,
+  onRenderFinal,
+  onContinue,
+  onRemix,
+}: {
+  item: HistoryItem;
+  onReusePrompt: (item: HistoryItem) => void;
+  onRenderFinal: (item: HistoryItem) => void;
+  onContinue: (item: HistoryItem) => void;
+  onRemix: (item: HistoryItem) => void;
+}) {
   const facts = item.report ? parseReport(item.report) : [];
   const [showPrompt, setShowPrompt] = useState(false);
 
@@ -242,13 +288,25 @@ function ResultToolbar({ item, onReusePrompt }: { item: HistoryItem; onReuseProm
 
         <div className="flex-1" />
 
+        {item.preset.startsWith("Turbo") && (
+          <Button variant="primary" size="sm" onClick={() => onRenderFinal(item)}>
+            <WandSparkles /> Render final
+          </Button>
+        )}
+        <Button variant="outline" size="sm" onClick={() => onContinue(item)}>
+          <StepForward /> Continue
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => onRemix(item)}>
+          <RefreshCw /> Remix
+        </Button>
+
         {item.refinedPrompt && (
           <Button variant="ghost" size="sm" onClick={() => setShowPrompt((current) => !current)}>
             <Sparkles /> {showPrompt ? "Hide" : "Enhanced"}
           </Button>
         )}
-        <Tip label="Put this prompt and seed back in the composer">
-          <Button variant="ghost" size="sm" iconOnly aria-label="Reuse prompt" onClick={() => onReusePrompt(item)}>
+        <Tip label="Restore this exact setup in the composer">
+          <Button variant="ghost" size="sm" iconOnly aria-label="Reuse setup" onClick={() => onReusePrompt(item)}>
             <CornerUpLeft />
           </Button>
         </Tip>

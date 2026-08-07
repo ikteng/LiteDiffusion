@@ -1,6 +1,5 @@
 import { ChevronDown, Trash2 } from "lucide-react";
 import { Collapsible } from "@base-ui/react/collapsible";
-import { ScrollArea } from "@base-ui/react/scroll-area";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
 import { POP, SETTLE } from "../lib/motion";
@@ -18,9 +17,8 @@ type Props = {
 /**
  * Every clip saved in this browser, newest first.
  *
- * A filmstrip rather than a list: the thumbnail is the only part of a generated clip anyone recognises, and a row of
- * them fits under the player on a phone as readily as on a desktop. The tiles are a uniform 16:9 with `object-cover`
- * so a portrait clip does not make the strip twice as tall as its neighbours.
+ * A compact project grid rather than a tiny filmstrip: clips are large enough to recognise and the newest projects
+ * remain directly below the active player. The thumbnails stay 16:9 and crop portrait clips so the grid remains calm.
  */
 export function History({ items, selectedId, onSelect, onDelete }: Props) {
   if (items.length === 0) return null;
@@ -38,9 +36,8 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
       </div>
 
       <Collapsible.Panel className="h-[var(--collapsible-panel-height)] overflow-hidden transition-[height] duration-200 ease-out data-starting-style:h-0 data-ending-style:h-0">
-      <ScrollArea.Root>
-        <ScrollArea.Viewport className="pb-2.5">
-          <ScrollArea.Content className="flex gap-2">
+        <div className="scrollbar-slim max-h-64 overflow-y-auto pr-1 pb-1">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-2.5">
             <AnimatePresence initial={false} mode="popLayout">
               {items.map((item) => (
                 <motion.div
@@ -50,7 +47,7 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.9 }}
                   transition={SETTLE}
-                  className="group/tile relative shrink-0"
+                  className="group/tile relative min-w-0 overflow-hidden rounded-xl bg-surface ring-1 ring-inset ring-line"
                 >
                   <button
                     type="button"
@@ -58,8 +55,8 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
                     aria-current={item.id === selectedId}
                     title={item.prompt}
                     className={cx(
-                      "block h-16 w-28 overflow-hidden rounded-lg bg-black ring-1 ring-inset transition-shadow duration-150",
-                      item.id === selectedId ? "ring-2 ring-accent" : "ring-line hover:ring-line-strong",
+                      "block aspect-video w-full overflow-hidden rounded-t-xl bg-black ring-1 ring-inset transition-shadow duration-150",
+                      item.id === selectedId ? "ring-2 ring-accent" : "ring-transparent hover:ring-line-strong",
                     )}
                   >
                     {/* `#t=0.1` asks for a frame rather than a black poster; `preload="metadata"` keeps a long
@@ -74,9 +71,12 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
                     />
                   </button>
 
-                  <span className="tabular pointer-events-none absolute bottom-1 left-1 rounded bg-black/75 px-1 text-[9.5px] font-medium text-ink backdrop-blur-sm">
-                    {formatClock(item.seconds)} · {presetName(item.preset)}
-                  </span>
+                  <button type="button" onClick={() => onSelect(item)} className="block w-full px-2.5 py-2 text-left">
+                    <span className="block truncate text-[11.5px] font-medium text-ink">{item.prompt}</span>
+                    <span className="tabular mt-0.5 block text-[10.5px] text-faint">
+                      {formatClock(item.seconds)} · {presetName(item.preset)} · seed {item.seed}
+                    </span>
+                  </button>
 
                   {/* Always visible on touch, where there is no hover to reveal it. */}
                   <Tip label="Remove from history">
@@ -86,7 +86,7 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
                       aria-label="Remove clip from history"
                       whileTap={{ scale: 0.9 }}
                       transition={POP}
-                      className="absolute right-1 top-1 grid size-5 place-items-center rounded-md bg-black/75 text-muted backdrop-blur-sm transition-[color,opacity] duration-100 hover:text-bad focus-visible:opacity-100 sm:opacity-0 sm:group-hover/tile:opacity-100"
+                      className="absolute right-1.5 top-1.5 grid size-7 place-items-center rounded-lg bg-black/75 text-muted backdrop-blur-sm transition-[color,opacity] duration-100 hover:text-bad focus-visible:opacity-100 sm:opacity-0 sm:group-hover/tile:opacity-100"
                     >
                       <Trash2 className="size-3" />
                     </motion.button>
@@ -94,16 +94,8 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
                 </motion.div>
               ))}
             </AnimatePresence>
-          </ScrollArea.Content>
-        </ScrollArea.Viewport>
-
-        <ScrollArea.Scrollbar
-          orientation="horizontal"
-          className="flex h-1.5 touch-none rounded-full bg-line/60 opacity-0 transition-opacity duration-150 data-hovering:opacity-100 data-scrolling:opacity-100 data-scrolling:duration-0"
-        >
-          <ScrollArea.Thumb className="h-full rounded-full bg-line-strong" />
-        </ScrollArea.Scrollbar>
-      </ScrollArea.Root>
+          </div>
+        </div>
       </Collapsible.Panel>
     </Collapsible.Root>
   );

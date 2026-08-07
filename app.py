@@ -11,6 +11,7 @@ import socket
 import tempfile
 import time
 import traceback
+from collections import OrderedDict
 from functools import cache
 from urllib.parse import urljoin, urlsplit
 
@@ -144,6 +145,10 @@ COND_PIPE = None
 COND_ERROR: str | None = None
 LOAD_ERROR: str | None = None
 LOADED_IN: float | None = None
+# A prompt + its two anchors typically occupies only a few MiB after conditioning. Keeping the newest four on CPU
+# makes Draft -> Final skip the 50-layer Qwen pass whenever ZeroGPU retains this warm worker between requests.
+CONDITION_CACHE = OrderedDict()
+CONDITION_CACHE_SIZE = 4
 
 
 def status() -> str:
@@ -526,7 +531,7 @@ def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, heig
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
 def _generate(
     prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, acceleration,
-    lora_path, egrid_path, lora_strength,
+    lora_path, egrid_path, lora_strength, conditioning_cache_key,
 ):
     """The only thing on GPU time: local conditioning, packed denoising and the two decoders.
 
@@ -545,21 +550,37 @@ def _generate(
 
     condition_seconds = None
     num_text_tokens = None
+    condition_cache_hit = False
     if prompt_embeds is None:
         if COND_PIPE is None:
             raise RuntimeError(f"The local conditioner is unavailable: {COND_ERROR or 'disabled'}")
-        conditioned = time.time()
-        condition_state = COND_PIPE(
-            prompt=prompt,
-            image=image,
-            last_image=last_image,
-            height=int(height),
-            width=int(width),
-        )
-        prompt_embeds = condition_state.get("prompt_embeds")
-        text_token_tags = condition_state.get("text_token_tags")
-        condition_seconds = time.time() - conditioned
-        num_text_tokens = int(prompt_embeds.shape[1])
+        cached = CONDITION_CACHE.pop(conditioning_cache_key, None) if conditioning_cache_key else None
+        if cached is not None:
+            prompt_embeds, text_token_tags = cached
+            CONDITION_CACHE[conditioning_cache_key] = cached
+            condition_seconds = 0.0
+            num_text_tokens = int(prompt_embeds.shape[1])
+            condition_cache_hit = True
+            print(f"[cond] reused {num_text_tokens}-token embedding", flush=True)
+        else:
+            conditioned = time.time()
+            condition_state = COND_PIPE(
+                prompt=prompt,
+                image=image,
+                last_image=last_image,
+                height=int(height),
+                width=int(width),
+            )
+            prompt_embeds = condition_state.get("prompt_embeds")
+            text_token_tags = condition_state.get("text_token_tags")
+            condition_seconds = time.time() - conditioned
+            num_text_tokens = int(prompt_embeds.shape[1])
+            if conditioning_cache_key:
+                cpu_embeds = prompt_embeds.detach().to("cpu")
+                cpu_tags = text_token_tags.detach().to("cpu") if hasattr(text_token_tags, "detach") else text_token_tags
+                CONDITION_CACHE[conditioning_cache_key] = (cpu_embeds, cpu_tags)
+                while len(CONDITION_CACHE) > CONDITION_CACHE_SIZE:
+                    CONDITION_CACHE.popitem(last=False)
 
     activate_lora = getattr(PIPE.transformer, "activate_lora", None)
     clear_lora = getattr(PIPE.transformer, "clear_lora", None)
@@ -598,6 +619,7 @@ def _generate(
         condition_seconds,
         num_text_tokens,
         cache_stats,
+        condition_cache_hit,
     )
 
 
@@ -720,7 +742,18 @@ def generate(
 
     progress_token = LocalContext.progress.set(progress)
     try:
-        frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens, cache_stats = _generate_with_hardware_retry(
+        conditioning_key = hashlib.sha256(
+            "\0".join(
+                [
+                    prompt,
+                    str(width),
+                    str(height),
+                    _sha256(image_path) if image_path else "",
+                    _sha256(last_image_path) if last_image_path else "",
+                ]
+            ).encode()
+        ).hexdigest()
+        frames, audio, sampling_rate, local_condition_seconds, local_num_text_tokens, cache_stats, condition_cache_hit = _generate_with_hardware_retry(
             prompt,
             prompt_embeds,
             text_token_tags,
@@ -735,6 +768,7 @@ def generate(
             lora_path,
             egrid_path,
             float(lora_strength) * adapter_scale,
+            conditioning_key,
         )
     finally:
         LocalContext.progress.reset(progress_token)
@@ -758,6 +792,7 @@ def generate(
         f"{f' @ {float(lora_strength):g}' if lora_path else ''} · "
         f"Sol-Attn {cache_stats.get('sol_sparse_calls', 0)} sparse calls · "
         f"conditioner {condition_seconds:.0f}s ({num_text_tokens} tokens"
+        f"{', cached' if condition_cache_hit else ''}"
         f"{', upsampled' if refined else ''}) · "
         f"denoise + decode {denoise_seconds:.0f}s ({denoise_seconds / max(1, actual_evaluations):.1f} s/eval) · "
         f"seed {int(seed)}"

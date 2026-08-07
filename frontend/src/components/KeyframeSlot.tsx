@@ -14,6 +14,7 @@ type Props = {
 export function KeyframeSlot({ label, hint, file, onChange }: Props) {
   const inputId = useId();
   const [preview, setPreview] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
     if (!file) {
@@ -27,10 +28,23 @@ export function KeyframeSlot({ label, hint, file, onChange }: Props) {
 
   return (
     <div
+      onDragEnter={(event) => {
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragOver={(event) => event.preventDefault()}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setDragging(false);
+        const dropped = [...event.dataTransfer.files].find((candidate) => candidate.type.startsWith("image/"));
+        if (dropped) onChange(dropped);
+      }}
       className={cx(
-        "relative h-28 overflow-hidden rounded-xl bg-sunken transition-colors duration-150",
+        "relative h-36 overflow-hidden rounded-xl bg-sunken transition-colors duration-150",
         // Solid once it holds an image, dashed while it is still an invitation to drop one in.
         preview ? "border border-line" : "border border-dashed border-line",
+        dragging && "border-accent bg-accent/8",
       )}
     >
       <input

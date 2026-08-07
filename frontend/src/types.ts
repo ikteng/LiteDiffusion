@@ -75,7 +75,14 @@ export type HistoryItem = GeneratedVideo & {
   seconds: number;
   seed: number;
   preset: string;
+  /** The complete request behind this clip. Older browser-history entries may not have it. */
+  recipe?: GenerationRecipe;
+  /** Original FL2VA anchors, cloned by IndexedDB so Draft -> Final remains faithful after a reload. */
+  sourceImage?: Blob | null;
+  sourceLastImage?: Blob | null;
 };
+
+export type GenerationRecipe = Omit<GenerationValues, "image" | "lastImage">;
 
 export type RunPhase = "queue" | "conditioning" | "gpu" | "denoising" | "finalizing";
 

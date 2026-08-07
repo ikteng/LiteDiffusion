@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Gauge, Loader2, Sparkles, Zap } from "lucide-react";
+import { Clapperboard, Gauge, Loader2, Sparkles, Zap } from "lucide-react";
 import { Toggle } from "@base-ui/react/toggle";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
@@ -24,6 +24,7 @@ type Props = {
   update: <K extends keyof GenerationValues>(key: K, value: GenerationValues[K]) => void;
   onApplyExample: (prompt: string, canvas: string) => void;
   onGenerate: () => void;
+  onGenerateDraft: () => void;
   running: boolean;
   /** Non-null when generating is impossible right now — shown in place of the GPU estimate. */
   blockedReason: string | null;
@@ -48,6 +49,7 @@ export function ComposeRail({
   update,
   onApplyExample,
   onGenerate,
+  onGenerateDraft,
   running,
   blockedReason,
   runtimeEstimate,
@@ -162,7 +164,7 @@ export function ComposeRail({
           </div>
         </Section>
 
-        <Section title="Keyframes" defaultOpen={false}>
+        <Section title="References" defaultOpen>
           <KeyframeSettings values={values} update={update} />
         </Section>
 
@@ -200,6 +202,10 @@ export function ComposeRail({
           </AnimatePresence>
         </div>
 
+        <Button variant="outline" size="lg" disabled={!ready} onClick={onGenerateDraft}>
+          {running ? <Loader2 className="animate-spin" /> : <Clapperboard />}
+          Draft
+        </Button>
         <Button variant="primary" size="lg" disabled={!ready} onClick={onGenerate}>
           {running ? <Loader2 className="animate-spin" /> : <Zap fill="currentColor" />}
           {running ? "Generating…" : "Generate"}
