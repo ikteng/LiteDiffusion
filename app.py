@@ -79,10 +79,24 @@ CANVASES = {
     "1536x672 · 21:9 full": (672, 1536),
 }
 DEFAULT_CANVAS = "960x544 · 16:9 fast"
+# Older clients briefly exposed this unsupported 480p label. Keep requests from those cached bundles working by
+# translating it to the closest canonical H3 canvas instead of allowing a raw mapping KeyError.
+CANVAS_ALIASES = {"832x480 · 480p": DEFAULT_CANVAS}
 FPS, FRAMES_PER_CHUNK, LATENTS_PER_CHUNK = 24, 17, 5
 # It is the *snapped* frame count the ceiling has to hold for: 15 s is 360 frames, which rounds up to 362, i.e.
 # 15.083 s, and is refused.
 MIN_UI_DURATION, MAX_UI_DURATION = 2, 14
+
+
+def resolve_canvas(value: str) -> str:
+    canvas = CANVAS_ALIASES.get(str(value), str(value))
+    if canvas not in CANVASES:
+        raise ValueError(
+            f"Unknown canvas {value!r}. Refresh the Space and choose a supported format: {', '.join(CANVASES)}"
+        )
+    if canvas != value:
+        print(f"[canvas] translated legacy {value!r} to {canvas!r}", flush=True)
+    return canvas
 
 
 def snap_frames(seconds: float) -> int:
@@ -480,6 +494,7 @@ def generate(
         raise RuntimeError("The denoiser is still loading.")
     if not prompt or not prompt.strip():
         raise ValueError("MiniMax-H3 always takes a prompt, keyframes or not.")
+    canvas = resolve_canvas(canvas)
     print(f"[prompt] {prompt!r}", flush=True)
 
     generation_preset = str(generation_preset or CUSTOM_PRESET)
