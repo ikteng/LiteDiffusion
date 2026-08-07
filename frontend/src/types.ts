@@ -61,6 +61,7 @@ export type RunProgress = {
   length?: number;
   unit?: string;
   exact?: boolean;
+  phase?: "queue" | "conditioning" | "gpu" | "denoising" | "finalizing";
 };
 
 export const FALLBACK_CONFIG: StudioConfig = {

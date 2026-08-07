@@ -37,13 +37,29 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
       position,
       eta: message.eta,
       exact: false,
+      phase: "queue",
     };
   }
   // Gradio 6 emits explicit gr.Progress packets with stage="pending" even after execution starts.
   if (message.stage === "generating" || message.stage === "streaming" || isProgressPacket) {
-    let fraction = progressItem?.progress ?? null;
-    if (fraction == null && progressItem?.index != null && progressItem.length) {
-      fraction = progressItem.index / progressItem.length;
+    const trackedStep = progressItem?.index != null && progressItem.length != null && progressItem.length > 0;
+    const rawFraction = progressItem?.progress ?? (trackedStep ? progressItem.index! / progressItem.length! : null);
+    const gpuInitialization = progressItem?.desc === "ZeroGPU init";
+    const denoising = trackedStep && !gpuInitialization;
+    let phase: RunProgress["phase"] = denoising
+      ? "denoising"
+      : gpuInitialization
+        ? "gpu"
+        : progressItem
+          ? "conditioning"
+          : previous.phase;
+    let fraction = rawFraction;
+    // Keep the full-job bar monotonic while still showing exact denoising counts separately.
+    if (rawFraction != null && gpuInitialization) fraction = 0.1 + rawFraction * 0.1;
+    if (rawFraction != null && denoising) fraction = 0.2 + rawFraction * 0.7;
+    if (!progressItem && previous.phase === "denoising") {
+      fraction = 0.9;
+      phase = "finalizing";
     }
     const exact = fraction != null;
     if (fraction == null && !progressItem && previous.stage === "generating") {
@@ -56,13 +72,18 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
     if (fraction != null) fraction = Math.max(0, Math.min(1, fraction));
     return {
       stage: "generating",
-      label: progressItem?.desc || (isProgressPacket && !progressItem ? "Finalizing video and audio" : previous.label) || "Generating video and sound",
+      label: denoising
+        ? progressItem?.desc || "Denoising video and audio"
+        : phase === "finalizing"
+          ? "Finalizing video and audio"
+          : progressItem?.desc || previous.label || "Generating video and sound",
       progress: fraction,
       eta: message.eta,
       index: progressItem?.index ?? undefined,
       length: progressItem?.length ?? undefined,
       unit: progressItem?.unit ?? undefined,
       exact,
+      phase,
     };
   }
   if (message.stage === "complete") {
