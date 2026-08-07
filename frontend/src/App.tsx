@@ -94,7 +94,9 @@ export default function App() {
     setError(null);
     setVideo(null);
     try {
-      const result = await runGeneration(values, setProgress);
+      // Never send a stale label retained by an older embedded bundle. `findCanvas` falls back to the first canvas
+      // from the live server config, so the API always receives one of its own canonical labels.
+      const result = await runGeneration({ ...values, canvas: findCanvas(config, values.canvas).label }, setProgress);
       setVideo(result);
       setProgress({ stage: "complete", label: "Complete", progress: 1, exact: true });
     } catch (caught) {

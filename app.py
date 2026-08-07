@@ -79,9 +79,6 @@ CANVASES = {
     "1536x672 · 21:9 full": (672, 1536),
 }
 DEFAULT_CANVAS = "960x544 · 16:9 fast"
-# Older clients briefly exposed this unsupported 480p label. Keep requests from those cached bundles working by
-# translating it to the closest canonical H3 canvas instead of allowing a raw mapping KeyError.
-CANVAS_ALIASES = {"832x480 · 480p": DEFAULT_CANVAS}
 FPS, FRAMES_PER_CHUNK, LATENTS_PER_CHUNK = 24, 17, 5
 # It is the *snapped* frame count the ceiling has to hold for: 15 s is 360 frames, which rounds up to 362, i.e.
 # 15.083 s, and is refused.
@@ -89,14 +86,33 @@ MIN_UI_DURATION, MAX_UI_DURATION = 2, 14
 
 
 def resolve_canvas(value: str) -> str:
-    canvas = CANVAS_ALIASES.get(str(value), str(value))
-    if canvas not in CANVASES:
-        raise ValueError(
-            f"Unknown canvas {value!r}. Refresh the Space and choose a supported format: {', '.join(CANVASES)}"
-        )
-    if canvas != value:
-        print(f"[canvas] translated legacy {value!r} to {canvas!r}", flush=True)
-    return canvas
+    """Return a canonical canvas, including for cached clients that submit an old WIDTHxHEIGHT label."""
+    canvas = str(value).strip()
+    if canvas in CANVASES:
+        return canvas
+
+    match = re.match(r"^(\d{3,4})\s*[x×]\s*(\d{3,4})(?:\s*·.*)?$", canvas)
+    if match:
+        requested_width, requested_height = (int(part) for part in match.groups())
+        if 256 <= requested_width <= 2048 and 256 <= requested_height <= 2048:
+            requested_ratio = requested_width / requested_height
+            requested_area = requested_width * requested_height
+
+            def distance(item):
+                _, (height, width) = item
+                ratio_error = abs(width / height - requested_ratio) / requested_ratio
+                area_error = abs(width * height - requested_area) / requested_area
+                return ratio_error * 4 + area_error
+
+            nearest, (height, width) = min(CANVASES.items(), key=distance)
+            ratio_error = abs(width / height - requested_ratio) / requested_ratio
+            if ratio_error <= 0.12:
+                print(f"[canvas] translated legacy {canvas!r} to {nearest!r}", flush=True)
+                return nearest
+
+    raise ValueError(
+        f"Unknown canvas {value!r}. Refresh the Space and choose a supported format: {', '.join(CANVASES)}"
+    )
 
 
 def snap_frames(seconds: float) -> int:
