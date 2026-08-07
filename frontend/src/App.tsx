@@ -7,6 +7,7 @@ import { History } from "./components/History";
 import { UsageSheet } from "./components/UsageSheet";
 import { Viewer } from "./components/Viewer";
 import { loadSpeed, saveSpeed } from "./lib/storage";
+import { deleteHistoryItem, restoreHistory, saveHistoryItem } from "./lib/history";
 import { estimateRuntime, loadRuntimeSamples, rememberRuntime, runtimeSampleFor } from "./lib/runtimeHistory";
 import { findCanvas, snapFrames, FPS } from "./lib/studio";
 import type { GenerationValues, HistoryItem, ModelStatus, RunProgress, StudioConfig } from "./types";
@@ -57,6 +58,24 @@ export default function App() {
     () => estimateRuntime(runtimeSamples, config, values),
     [runtimeSamples, config, values],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    restoreHistory().then((restored) => {
+      if (cancelled) {
+        for (const item of restored) URL.revokeObjectURL(item.url);
+        return;
+      }
+      setHistory((current) => {
+        const ids = new Set(current.map((item) => item.id));
+        return [...current, ...restored.filter((item) => !ids.has(item.id))].sort((a, b) => b.createdAt - a.createdAt);
+      });
+      setSelectedId((current) => current ?? restored[0]?.id ?? null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     fetchStudioConfig()
@@ -132,6 +151,8 @@ export default function App() {
         preset: values.preset,
       };
       setHistory((current) => [item, ...current]);
+      // The UI can show the result immediately; durable browser storage continues without delaying completion.
+      void saveHistoryItem(item).catch((reason) => console.warn("Could not persist generated clip.", reason));
       setRuntimeSamples((current) => rememberRuntime(current, runtimeSampleFor(config, requestValues, result.runtimeSeconds)));
       setSelectedId(item.id);
       setProgress({ stage: "complete", label: "Complete", progress: 1, exact: true });
@@ -143,7 +164,8 @@ export default function App() {
   }
 
   function removeFromHistory(item: HistoryItem) {
-    URL.revokeObjectURL(item.url);
+    if (item.url.startsWith("blob:")) URL.revokeObjectURL(item.url);
+    void deleteHistoryItem(item.id);
     setHistory((current) => {
       const next = current.filter((candidate) => candidate.id !== item.id);
       // Deleting what you were watching should land on the neighbour, not on the empty state.

@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { MediaPlayer, MediaProvider } from "@vidstack/react";
+import { DefaultVideoLayout, defaultLayoutIcons } from "@vidstack/react/player/layouts/default";
+import "@vidstack/react/player/styles/base.css";
+import "@vidstack/react/player/styles/default/theme.css";
 import { AlertTriangle, Check, Clock3, Copy, CornerUpLeft, Download, Film, Sparkles, Volume2, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
@@ -86,22 +90,18 @@ export function Viewer({ item, progress, running, error, onDismissError, onReuse
 }
 
 function Player({ item }: { item: HistoryItem }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  // A different clip replaces the element's src; make sure it actually restarts rather than holding the last frame.
-  useEffect(() => {
-    videoRef.current?.load();
-  }, [item.url]);
-
   return (
-    <video
-      ref={videoRef}
-      src={item.url}
-      controls
+    <MediaPlayer
+      key={item.url}
+      src={{ src: item.url, type: "video/mp4" }}
+      title={item.prompt}
       autoPlay
       playsInline
-      className="size-full bg-black object-contain"
-    />
+      className="size-full bg-black text-white"
+    >
+      <MediaProvider className="size-full [&_video]:size-full [&_video]:object-contain" />
+      <DefaultVideoLayout icons={defaultLayoutIcons} />
+    </MediaPlayer>
   );
 }
 

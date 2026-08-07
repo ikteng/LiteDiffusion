@@ -16,7 +16,7 @@ type Props = {
 };
 
 /**
- * Every clip from this session, newest first.
+ * Every clip saved in this browser, newest first.
  *
  * A filmstrip rather than a list: the thumbnail is the only part of a generated clip anyone recognises, and a row of
  * them fits under the player on a phone as readily as on a desktop. The tiles are a uniform 16:9 with `object-cover`
@@ -26,14 +26,14 @@ export function History({ items, selectedId, onSelect, onDelete }: Props) {
   if (items.length === 0) return null;
 
   return (
-    <Collapsible.Root defaultOpen render={<section aria-label="This session's clips" className="mt-4 shrink-0" />}>
+    <Collapsible.Root defaultOpen render={<section aria-label="Saved clips" className="mt-4 shrink-0" />}>
       <div className="mb-2 flex items-baseline gap-2">
         <Collapsible.Trigger className="group flex items-center gap-1 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-faint">
           <ChevronDown className="size-3 transition-transform duration-200 group-data-panel-open:rotate-180" />
           History
         </Collapsible.Trigger>
         <span className="tabular text-[11px] text-faint">
-          {items.length} clip{items.length === 1 ? "" : "s"} this session
+          {items.length} saved clip{items.length === 1 ? "" : "s"}
         </span>
       </div>
 
