@@ -22,12 +22,13 @@ export async function fetchModelStatus(): Promise<{ ready: boolean; status: stri
   return response.json() as Promise<{ ready: boolean; status: string }>;
 }
 
-function statusLabel(message: StatusMessage, startedAt: number): RunProgress {
+function statusLabel(message: StatusMessage, startedAt: number, previous: RunProgress): RunProgress {
   const items = message.progress_data ?? [];
+  const isProgressPacket = message.progress_data !== undefined;
   const progressItem = [...items].reverse().find(
     (item) => item.desc || item.progress != null || (item.index != null && item.length != null),
   );
-  if (message.stage === "pending" && !progressItem) {
+  if (message.stage === "pending" && !isProgressPacket) {
     const position = message.position;
     return {
       stage: "queued",
@@ -39,12 +40,15 @@ function statusLabel(message: StatusMessage, startedAt: number): RunProgress {
     };
   }
   // Gradio 6 emits explicit gr.Progress packets with stage="pending" even after execution starts.
-  if (message.stage === "generating" || message.stage === "streaming" || progressItem) {
+  if (message.stage === "generating" || message.stage === "streaming" || isProgressPacket) {
     let fraction = progressItem?.progress ?? null;
     if (fraction == null && progressItem?.index != null && progressItem.length) {
       fraction = progressItem.index / progressItem.length;
     }
     const exact = fraction != null;
+    if (fraction == null && !progressItem && previous.stage === "generating") {
+      fraction = previous.progress;
+    }
     if (fraction == null && message.eta != null && message.eta > 0) {
       const elapsed = (Date.now() - startedAt) / 1000;
       fraction = elapsed / (elapsed + message.eta);
@@ -52,7 +56,7 @@ function statusLabel(message: StatusMessage, startedAt: number): RunProgress {
     if (fraction != null) fraction = Math.max(0, Math.min(1, fraction));
     return {
       stage: "generating",
-      label: progressItem?.desc || "Generating video and sound",
+      label: progressItem?.desc || (isProgressPacket && !progressItem ? "Finalizing video and audio" : previous.label) || "Generating video and sound",
       progress: fraction,
       eta: message.eta,
       index: progressItem?.index ?? undefined,
@@ -113,9 +117,16 @@ export async function runGeneration(
   });
 
   let result: unknown[] | null = null;
+  let latestProgress: RunProgress = {
+    stage: "connecting",
+    label: "Connecting to the generator",
+    progress: null,
+    exact: false,
+  };
   for await (const event of submission) {
     if (event.type === "status") {
-      const next = statusLabel(event, startedAt);
+      const next = statusLabel(event, startedAt, latestProgress);
+      latestProgress = next;
       onProgress(next);
       if (next.stage === "error") throw new Error(next.label);
     } else if (event.type === "data") {

@@ -163,6 +163,9 @@ def load_models() -> str | None:
         blocks = MiniMaxH3GeneratorBlocks()
         print(f"[gen] loading {[c.name for c in blocks.expected_components]} from {MODEL_REPO} ...", flush=True)
         pipe = blocks.init_pipeline(MODEL_REPO, components_manager=manager, collection="h3")
+        # This is consumed by the endpoint's Gradio Progress tracker and forwarded across the ZeroGPU worker RPC,
+        # producing one real queue update per denoising step.
+        pipe.set_progress_bar_config(desc="Denoising")
         if ENGINE == "nvfp4":
             # Do not download the 61.7 GiB BF16 transformer. The schedulers and full-precision VAEs stay canonical;
             # only the repeatedly executed DiT is replaced with the pruned Blackwell-native checkpoint.
@@ -697,6 +700,7 @@ def generate_api(
     lora_filename: str = "",
     lora_strength: float = 1.0,
     generation_preset: str = DEFAULT_PRESET,
+    progress=gr.Progress(track_tqdm=True),
     request: Request = None,
 ) -> tuple[FileData, str, str]:
     """Queued generation endpoint used by both the React studio and ordinary gradio_client callers."""
@@ -717,6 +721,7 @@ def generate_api(
         lora_strength,
         generation_preset,
         ip_token=ip_token,
+        progress=progress,
     )
 
 
