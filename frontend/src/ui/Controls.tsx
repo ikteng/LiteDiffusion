@@ -1,12 +1,14 @@
 import type { ComponentProps, ReactNode } from "react";
+import { Dices, Minus, Plus } from "lucide-react";
 import { Field as BaseField } from "@base-ui/react/field";
 import { Input } from "@base-ui/react/input";
+import { NumberField } from "@base-ui/react/number-field";
 import { Progress as BaseProgress } from "@base-ui/react/progress";
-import { Slider as BaseSlider } from "@base-ui/react/slider";
 import { Switch as BaseSwitch } from "@base-ui/react/switch";
 import { motion } from "framer-motion";
 import { cx } from "../lib/cx";
 import { POP } from "../lib/motion";
+import { Tip } from "./Tip";
 
 /**
  * Label, live readout and hint around one control.
@@ -21,72 +23,24 @@ export function Field({
   children,
 }: {
   label: string;
-  hint?: string;
+  hint?: ReactNode;
   /** Right-aligned live readout, so the current setting is legible without reading the control. */
   value?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <BaseField.Root className="block">
-      <span className="mb-1.5 flex items-baseline justify-between gap-3">
-        <BaseField.Label className="text-[11px] font-medium uppercase tracking-[0.07em] text-faint">
-          {label}
-        </BaseField.Label>
-        {value && <span className="tabular text-[12px] text-muted">{value}</span>}
+      <span className="mb-2 flex items-baseline justify-between gap-3">
+        <BaseField.Label className="text-[12px] font-medium text-muted">{label}</BaseField.Label>
+        {value && <span className="tabular shrink-0 text-[12px] font-medium text-ink">{value}</span>}
       </span>
       {children}
       {hint && (
-        <BaseField.Description className="mt-1.5 block text-[11px] leading-[1.45] text-faint">
+        <BaseField.Description className="mt-2 block text-[11px] leading-[1.5] text-faint">
           {hint}
         </BaseField.Description>
       )}
     </BaseField.Root>
-  );
-}
-
-type SliderProps = {
-  min: number;
-  max: number;
-  step?: number;
-  value: number;
-  onChange: (value: number) => void;
-  ariaLabel: string;
-};
-
-/**
- * A continuous slider.
- *
- * `thumbAlignment="edge"` keeps the thumb inside the track at both ends instead of hanging half of it over the edge
- * of the panel. The position transition is cancelled while dragging (`data-dragging`) so the thumb tracks the pointer
- * exactly, and only animates when the value is changed by a keypress or a click on the track.
- */
-export function Slider({ min, max, step = 1, value, onChange, ariaLabel }: SliderProps) {
-  return (
-    <BaseSlider.Root
-      className="group block"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      thumbAlignment="edge"
-      onValueChange={(next) => onChange(Array.isArray(next) ? next[0] : next)}
-    >
-      <BaseSlider.Control className="flex h-5 w-full touch-none select-none items-center">
-        <BaseSlider.Track className="h-1 w-full rounded-full bg-line">
-          <BaseSlider.Indicator className="rounded-full bg-accent transition-[width] duration-150 ease-out group-data-dragging:duration-0" />
-          <BaseSlider.Thumb
-            getAriaLabel={() => ariaLabel}
-            className={cx(
-              "size-4 rounded-full border-[3px] border-canvas bg-ink shadow-[0_0_0_1px_var(--color-line-strong)]",
-              // See NotchSlider: the position is Base UI's to write, so the transition is CSS and steps out of the
-              // way while dragging. `scale` is its own property, so it never disturbs the thumb measurement.
-              "[transition:inset-inline-start_150ms_ease-out,scale_120ms_ease-out]",
-              "group-data-dragging:scale-110 group-data-dragging:[transition:scale_120ms_ease-out]",
-            )}
-          />
-        </BaseSlider.Track>
-      </BaseSlider.Control>
-    </BaseSlider.Root>
   );
 }
 
@@ -97,14 +51,83 @@ export function TextInput({ className, ...rest }: TextInputProps) {
     <Input
       {...rest}
       className={cx(
-        "h-9 w-full rounded-lg border border-line bg-sunken px-2.5 text-[13px] text-ink",
-        "transition-colors duration-100 placeholder:text-faint hover:border-line-strong",
-        "focus:border-accent focus:outline-none",
+        "h-9 w-full rounded-lg bg-sunken px-2.5 text-[13px] text-ink ring-1 ring-inset ring-line",
+        "transition-[box-shadow,background-color] duration-100 placeholder:text-faint hover:ring-line-strong",
+        "focus:bg-canvas focus:ring-accent focus:outline-none",
         className,
       )}
     />
   );
 }
+
+/**
+ * An integer field with steppers.
+ *
+ * The steppers are not decoration on a seed: the neighbours of a seed you liked are the most useful thing to try next,
+ * and ±1 is a click here instead of a select-all-and-retype. Grouping is disabled because `1,234,567` is a quantity
+ * and a seed is a name.
+ */
+export function NumberInput({
+  value,
+  onChange,
+  min,
+  max,
+  ariaLabel,
+  onRandomise,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  min: number;
+  max: number;
+  ariaLabel: string;
+  onRandomise?: () => void;
+}) {
+  return (
+    <div className="flex gap-2">
+      <NumberField.Root
+        value={value}
+        onValueChange={(next) => onChange(next ?? 0)}
+        min={min}
+        max={max}
+        step={1}
+        largeStep={1000}
+        format={{ useGrouping: false }}
+        className="min-w-0 flex-1"
+      >
+        <NumberField.Group className="flex h-9 w-full overflow-hidden rounded-lg bg-sunken ring-1 ring-inset ring-line transition-shadow duration-100 hover:ring-line-strong focus-within:ring-accent">
+          <NumberField.Decrement className={STEPPER} aria-label={`Decrease ${ariaLabel}`}>
+            <Minus className="size-3.5" />
+          </NumberField.Decrement>
+          <NumberField.Input
+            aria-label={ariaLabel}
+            className="tabular h-full min-w-0 flex-1 bg-transparent text-center text-[13px] text-ink focus:outline-none"
+          />
+          <NumberField.Increment className={STEPPER} aria-label={`Increase ${ariaLabel}`}>
+            <Plus className="size-3.5" />
+          </NumberField.Increment>
+        </NumberField.Group>
+      </NumberField.Root>
+
+      {onRandomise && (
+        <Tip label="Pick a random seed">
+          <button
+            type="button"
+            onClick={onRandomise}
+            aria-label="Randomise seed"
+            className="grid size-9 shrink-0 place-items-center rounded-lg bg-raised text-muted shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] transition-colors duration-100 hover:bg-line hover:text-ink"
+          >
+            <Dices className="size-4" />
+          </button>
+        </Tip>
+      )}
+    </div>
+  );
+}
+
+const STEPPER = cx(
+  "grid w-8 shrink-0 place-items-center text-muted transition-colors duration-100",
+  "hover:bg-raised hover:text-ink data-disabled:text-faint/50 data-disabled:hover:bg-transparent",
+);
 
 /**
  * A labelled switch.
@@ -129,13 +152,13 @@ export function Switch({
         checked={checked}
         onCheckedChange={onChange}
         className={cx(
-          "mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full border p-[2px]",
-          "border-line-strong bg-sunken transition-colors duration-150",
-          "data-checked:border-accent data-checked:bg-accent",
+          "mt-px inline-flex h-5 w-9 shrink-0 items-center rounded-full p-[2px]",
+          "bg-line ring-1 ring-inset ring-white/5 transition-colors duration-150",
+          "data-checked:bg-accent",
         )}
       >
         <BaseSwitch.Thumb
-          className="block size-3.5 rounded-full bg-ink data-checked:ml-auto data-checked:bg-accent-ink"
+          className="block size-4 rounded-full bg-ink shadow-[0_1px_2px_rgb(0_0_0/0.5)] data-checked:ml-auto data-checked:bg-accent-ink"
           render={<motion.span layout transition={POP} />}
         />
       </BaseSwitch.Root>
@@ -161,15 +184,15 @@ export function Chip({
   className?: string;
 }) {
   const tones = {
-    neutral: "border-line bg-raised text-muted",
-    accent: "border-accent/40 bg-accent/12 text-accent",
-    ok: "border-ok/35 bg-ok/12 text-ok",
-    bad: "border-bad/40 bg-bad/12 text-bad",
+    neutral: "bg-raised text-muted ring-line",
+    accent: "bg-accent/12 text-accent ring-accent/35",
+    ok: "bg-ok/12 text-ok ring-ok/30",
+    bad: "bg-bad/12 text-bad ring-bad/35",
   } as const;
   return (
     <span
       className={cx(
-        "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium",
+        "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium ring-1 ring-inset",
         tones[tone],
         className,
       )}
@@ -190,7 +213,7 @@ export function Progress({ value, label }: { value: number | null; label: string
   return (
     <BaseProgress.Root value={percent} className="block w-full">
       <BaseProgress.Label className="sr-only">{label}</BaseProgress.Label>
-      <BaseProgress.Track className="relative h-1 w-full overflow-hidden rounded-full bg-line">
+      <BaseProgress.Track className="relative h-1.5 w-full overflow-hidden rounded-full bg-line">
         {percent == null ? (
           <span className="sweep absolute inset-y-0 left-0 w-1/3 rounded-full bg-accent" />
         ) : (

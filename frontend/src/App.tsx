@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import { fetchModelStatus, fetchStudioConfig, runGeneration } from "./api";
 import { AboutSheet } from "./components/AboutSheet";
-import { Composer } from "./components/Composer";
+import { ComposeRail } from "./components/ComposeRail";
 import { Header } from "./components/Header";
-import { Stage } from "./components/Stage";
+import { History } from "./components/History";
 import { UsageSheet } from "./components/UsageSheet";
-import { cx } from "./lib/cx";
-import { SETTLE } from "./lib/motion";
-import { findCanvas } from "./lib/studio";
-import type { GeneratedVideo, GenerationValues, ModelStatus, RunProgress, StudioConfig } from "./types";
+import { Viewer } from "./components/Viewer";
+import { findCanvas, snapFrames, FPS } from "./lib/studio";
+import type { GenerationValues, HistoryItem, ModelStatus, RunProgress, StudioConfig } from "./types";
 import { FALLBACK_CONFIG } from "./types";
 
 const IDLE: RunProgress = { stage: "idle", label: "Ready", progress: null };
@@ -39,15 +37,16 @@ export default function App() {
   const [values, setValues] = useState(() => initialValues(FALLBACK_CONFIG));
   const [model, setModel] = useState<ModelStatus>({ ready: false, status: "Contacting the Space…", reachable: true });
   const [progress, setProgress] = useState<RunProgress>(IDLE);
-  const [video, setVideo] = useState<GeneratedVideo | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usageOpen, setUsageOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
-  const stageRef = useRef<HTMLDivElement>(null);
+  const viewerRef = useRef<HTMLDivElement>(null);
 
   const running =
     progress.stage === "connecting" || progress.stage === "queued" || progress.stage === "generating";
-  const hasStage = running || video != null || error != null;
+  const selected = history.find((item) => item.id === selectedId) ?? null;
 
   useEffect(() => {
     fetchStudioConfig()
@@ -92,12 +91,23 @@ export default function App() {
   async function generate() {
     if (!values.prompt.trim() || running) return;
     setError(null);
-    setVideo(null);
+    // On a phone the viewer is below the rail; bring it up rather than leaving the run happening off-screen.
+    viewerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     try {
-      // Never send a stale label retained by an older embedded bundle. `findCanvas` falls back to the first canvas
-      // from the live server config, so the API always receives one of its own canonical labels.
+      // Canonicalize against the live config so a stale embedded bundle cannot submit a display-only resolution.
       const result = await runGeneration({ ...values, canvas: findCanvas(config, values.canvas).label }, setProgress);
-      setVideo(result);
+      const item: HistoryItem = {
+        ...result,
+        id: `${Date.now().toString(36)}-${history.length}`,
+        createdAt: Date.now(),
+        prompt: values.prompt,
+        canvas: findCanvas(config, values.canvas),
+        seconds: snapFrames(values.duration) / FPS,
+        seed: values.seed,
+        preset: values.preset,
+      };
+      setHistory((current) => [item, ...current]);
+      setSelectedId(item.id);
       setProgress({ stage: "complete", label: "Complete", progress: 1, exact: true });
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Generation failed. Please try again.";
@@ -106,73 +116,63 @@ export default function App() {
     }
   }
 
-  // On a short window the result lands below the fold; bring it into view rather than leaving the user to find it.
-  useEffect(() => {
-    if (video) stageRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [video]);
+  function removeFromHistory(item: HistoryItem) {
+    URL.revokeObjectURL(item.url);
+    setHistory((current) => {
+      const next = current.filter((candidate) => candidate.id !== item.id);
+      // Deleting what you were watching should land on the neighbour, not on the empty state.
+      if (item.id === selectedId) setSelectedId(next[0]?.id ?? null);
+      return next;
+    });
+  }
 
   const blockedReason = model.reachable && !model.ready ? "Engine still loading" : null;
 
   return (
-    <div className="flex min-h-screen flex-col">
+    // `lg:h-dvh lg:overflow-hidden` makes the two panes scroll independently on a desktop; below `lg` the whole thing
+    // is one ordinary scrolling document, which is the only layout that behaves on a phone.
+    <div className="flex min-h-dvh flex-col lg:h-dvh lg:overflow-hidden">
       <Header model={model} onOpenUsage={() => setUsageOpen(true)} onOpenAbout={() => setAboutOpen(true)} />
 
-      <main className="flex-1">
-        <div
-          className={cx(
-            "mx-auto flex min-h-[calc(100vh-3.5rem)] w-full max-w-3xl flex-col gap-5 px-4 pb-10",
-            hasStage ? "justify-start pt-6" : "justify-center pt-0",
-          )}
-        >
-          {/* The hero is the page until there is something better to look at, then it gets out of the way and the
-              composer takes its place. `layout` on the composer is what makes that a move rather than a jump. */}
-          <AnimatePresence initial={false}>
-            {!hasStage && (
-              <motion.div
-                key="hero"
-                layout
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -12, height: 0, marginBottom: -20 }}
-                transition={SETTLE}
-                className="overflow-hidden text-center"
-              >
-                <h1 className="text-balance text-[26px] font-semibold leading-tight tracking-[-0.03em] sm:text-[32px]">
-                  Make a scene from a sentence.
-                </h1>
-                <p className="mt-2 text-[13.5px] text-muted">
-                  Video and its soundtrack, generated together in one pass.
-                </p>
-              </motion.div>
-            )}
-          </AnimatePresence>
+      <main className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
+        <div className="min-h-0 border-line lg:border-r">
+          <ComposeRail
+            config={config}
+            values={values}
+            update={update}
+            onApplyExample={applyExample}
+            onGenerate={generate}
+            running={running}
+            blockedReason={blockedReason}
+          />
+        </div>
 
-          {/* `layout="position"` and not plain `layout`: the composer must slide up when the hero leaves, but the
-              textarea grows as you type, and springing its *height* would leave the caret trailing the cursor. */}
-          <motion.div layout="position" transition={SETTLE}>
-            <Composer
-              config={config}
-              values={values}
-              update={update}
-              onApplyExample={applyExample}
-              onGenerate={generate}
-              running={running}
-              blockedReason={blockedReason}
-            />
-          </motion.div>
-
-          <div ref={stageRef}>
-            <Stage
-              video={video}
-              progress={progress}
-              error={error}
-              canvas={findCanvas(config, values.canvas)}
-              onDismissError={() => {
-                setError(null);
-                setProgress(IDLE);
-              }}
-            />
-          </div>
+        {/* On a desktop this column is a fixed frame: the player takes what is left after the history strip, and
+            nothing here scrolls. On a phone it is just the bottom half of the page. */}
+        <div ref={viewerRef} className="flex min-h-0 flex-col p-4 lg:overflow-hidden lg:p-5">
+          <Viewer
+            className="lg:min-h-0 lg:flex-1"
+            item={selected}
+            progress={progress}
+            running={running}
+            error={error}
+            onDismissError={() => {
+              setError(null);
+              setProgress(IDLE);
+            }}
+            onReusePrompt={(item) =>
+              setValues((current) => ({ ...current, prompt: item.prompt, seed: item.seed }))
+            }
+          />
+          <History
+            items={history}
+            selectedId={selectedId}
+            onSelect={(item) => {
+              setSelectedId(item.id);
+              setError(null);
+            }}
+            onDelete={removeFromHistory}
+          />
         </div>
       </main>
 

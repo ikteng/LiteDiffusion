@@ -57,6 +57,22 @@ export type GeneratedVideo = {
   refinedPrompt: string;
 };
 
+/**
+ * A finished clip, plus enough of the request to make sense of it later.
+ *
+ * The settings are copied rather than referenced because the point of history is to survive the controls moving on:
+ * the third clip must still say it was 4-step at 768p after you have switched everything to 28-step at 544p.
+ */
+export type HistoryItem = GeneratedVideo & {
+  id: string;
+  createdAt: number;
+  prompt: string;
+  canvas: CanvasOption;
+  seconds: number;
+  seed: number;
+  preset: string;
+};
+
 export type RunPhase = "queue" | "conditioning" | "gpu" | "denoising" | "finalizing";
 
 export type RunProgress = {

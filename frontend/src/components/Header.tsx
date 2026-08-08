@@ -15,8 +15,8 @@ export function Header({ model, onOpenUsage, onOpenAbout }: Props) {
   const summary = !model.reachable ? "Offline" : model.ready ? "Ready" : "Warming up";
 
   return (
-    <header className="sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur-md">
-      <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-2 px-4">
+    <header className="sticky top-0 z-30 shrink-0 border-b border-line bg-canvas/85 backdrop-blur-md">
+      <div className="flex h-13 w-full items-center gap-2 px-4">
         <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-accent text-accent-ink">
           <Zap className="size-4" fill="currentColor" />
         </span>

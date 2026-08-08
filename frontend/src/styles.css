@@ -49,11 +49,13 @@
     min-height: 100vh;
   }
 
-  /* One focus treatment for the whole app, so every custom control gets a visible ring for free. */
+  /* One focus treatment for the whole app, so every custom control gets a visible ring for free.
+
+     Deliberately no `border-radius` here: an outline already follows the element's own corners, and setting a radius
+     from this rule would square off anything round — the slider thumb most visibly. */
   :focus-visible {
     outline: 2px solid var(--color-accent);
     outline-offset: 2px;
-    border-radius: 6px;
   }
 
   ::selection {

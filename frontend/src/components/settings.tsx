@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ChevronDown, Dices } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";
@@ -20,15 +20,14 @@ import {
 } from "../lib/studio";
 import { cx } from "../lib/cx";
 import type { Acceleration, GenerationValues, LoraPreset, StudioConfig } from "../types";
-import { Button } from "../ui/Button";
-import { Field, Slider, Switch, TextInput } from "../ui/Controls";
-import { NotchSlider } from "../ui/NotchSlider";
+import { Field, NumberInput, Switch, TextInput } from "../ui/Controls";
 import { Segmented } from "../ui/Segmented";
+import { Slider } from "../ui/Slider";
 import { KeyframeSlot } from "./KeyframeSlot";
 
 type Update = <K extends keyof GenerationValues>(key: K, value: GenerationValues[K]) => void;
 
-type PanelProps = {
+type SettingsProps = {
   config: StudioConfig;
   values: GenerationValues;
   update: Update;
@@ -52,6 +51,117 @@ function sentence(text: string): string {
   return `${text[0].toUpperCase()}${text.slice(1)}${/[.!?]$/.test(text) ? "" : "."}`;
 }
 
+/* ------------------------------------------------------------------ format */
+
+export function FormatSettings({ config, values, update }: SettingsProps) {
+  const groups = groupCanvases(config.canvases);
+  const canvas = findCanvas(config, values.canvas);
+  const activeGroup = groups.find((group) => group.options.some((option) => option.label === canvas.label)) ?? groups[0];
+  const tier = activeGroup.options.findIndex((option) => option.label === canvas.label);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Field label="Aspect ratio">
+        <RadioGroup
+          aria-label="Aspect ratio"
+          value={activeGroup.ratio}
+          // Carry the size tier across ratios, so someone on "full" does not silently drop to "fast".
+          onValueChange={(next) => {
+            const group = groups.find((candidate) => candidate.ratio === next);
+            if (!group) return;
+            update("canvas", group.options[Math.min(Math.max(tier, 0), group.options.length - 1)].label);
+          }}
+          className="grid grid-cols-3 gap-1.5 sm:grid-cols-6 lg:grid-cols-3"
+        >
+          {groups.map((group) => {
+            const selected = group.ratio === activeGroup.ratio;
+            const landscape = group.value >= 1;
+            return (
+              <Radio.Root
+                key={group.ratio}
+                value={group.ratio}
+                className={cx(
+                  "flex cursor-pointer flex-col items-center gap-1.5 rounded-lg py-2 ring-1 ring-inset",
+                  "transition-colors duration-100",
+                  selected
+                    ? "bg-accent/10 text-ink ring-accent/50"
+                    : "bg-sunken text-muted ring-line hover:text-ink hover:ring-line-strong",
+                )}
+              >
+                {/* The box has to be square for the percentages below to describe the ratio they claim to. */}
+                <span aria-hidden className="grid size-6 place-items-center">
+                  <span
+                    className={cx(
+                      "block rounded-[3px] border transition-colors duration-100",
+                      selected ? "border-accent" : "border-line-strong",
+                    )}
+                    style={
+                      landscape
+                        ? { width: "100%", height: `${100 / group.value}%` }
+                        : { height: "100%", width: `${100 * group.value}%` }
+                    }
+                  />
+                </span>
+                <span className="tabular text-[11px] font-medium">{group.ratio}</span>
+              </Radio.Root>
+            );
+          })}
+        </RadioGroup>
+      </Field>
+
+      <Field
+        label="Resolution"
+        value={`${canvas.width} × ${canvas.height}`}
+        hint="Attention cost grows with the square of the canvas, so a larger frame is much slower than a longer clip."
+      >
+        <Segmented
+          ariaLabel="Resolution"
+          value={canvas.label}
+          onChange={(next) => update("canvas", next)}
+          options={activeGroup.options.map((option) => ({
+            value: option.label,
+            // The short edge is the familiar name for a video size (544p, 768p) regardless of orientation.
+            label: `${Math.min(option.width, option.height)}p`,
+            hint: option.fast ? "fast" : undefined,
+          }))}
+        />
+      </Field>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ length */
+
+export function LengthSettings({ config, values, update }: SettingsProps) {
+  const frames = snapFrames(values.duration);
+  const seconds = frames / FPS;
+
+  return (
+    <Field
+      label="Clip length"
+      value={`${formatClock(seconds)} · ${frames} frames`}
+      hint={
+        <>
+          The decoder only accepts <span className="tabular">17n + 5</span> frames at {FPS} fps, so lengths snap to the
+          next valid count — {values.duration} s becomes {seconds.toFixed(2)} s.
+        </>
+      }
+    >
+      <Slider
+        ariaLabel="Clip length in seconds"
+        min={config.duration.min}
+        max={config.duration.max}
+        value={values.duration}
+        onChange={(next) => update("duration", next)}
+        minLabel={`${config.duration.min} s`}
+        maxLabel={`${config.duration.max} s`}
+      />
+    </Field>
+  );
+}
+
+/* ------------------------------------------------------------------- speed */
+
 /**
  * The presets as one axis rather than a list of paragraphs.
  *
@@ -60,7 +170,7 @@ function sentence(text: string): string {
  * *not* on the axis lives under Advanced: manual control, which is an escape from the presets rather than a point
  * along them.
  */
-export function SpeedPanel({ config, values, update }: PanelProps) {
+export function SpeedSettings({ config, values, update }: SettingsProps) {
   const axis = presetAxis(config.presets);
   const custom = config.presets.find((preset) => preset.custom);
   const manual = custom != null && values.preset === custom.value;
@@ -77,19 +187,25 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
   const budget = formatBudget(budgetFor(config, values, steps));
 
   return (
-    <div className="flex flex-col gap-3">
-      <NotchSlider
-        ariaLabel="Generation preset"
-        minLabel="Faster"
-        maxLabel="Smarter"
-        stops={axis.map((preset) => presetName(preset.value))}
-        index={shown}
-        disabled={manual}
-        onChange={(next) => update("preset", axis[next].value)}
-      />
+    <div className="flex flex-col gap-3.5">
+      {/* The same label/value row as Clip length, so the two sliders in the rail read as one control repeated rather
+          than two different ideas. Cost is to a preset what frame count is to a duration: the number you are trading. */}
+      <Field label="Preset" value={budget}>
+        <Slider
+          ariaLabel="Generation preset"
+          stops={axis.map((preset) => presetName(preset.value))}
+          min={0}
+          max={Math.max(1, axis.length - 1)}
+          value={shown}
+          disabled={manual}
+          onChange={(next) => update("preset", axis[next].value)}
+          minLabel="Faster"
+          maxLabel="Smarter"
+        />
+      </Field>
 
-      {/* `layout` on the card is what keeps the popover from jolting when a longer description swaps in. */}
-      <motion.div layout transition={FADE} className="overflow-hidden rounded-lg bg-sunken px-3 py-2.5">
+      {/* `layout` on the card keeps the rail from jolting when a longer description swaps in. */}
+      <motion.div layout transition={FADE} className="overflow-hidden rounded-xl bg-sunken px-3 py-2.5 ring-1 ring-inset ring-line">
         <p className="flex items-baseline gap-2">
           <span className="text-[13.5px] font-medium text-ink">{manual ? "Manual" : presetName(current.value)}</span>
           <AnimatePresence initial={false}>
@@ -105,7 +221,6 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
               </motion.span>
             )}
           </AnimatePresence>
-          <span className="tabular ml-auto shrink-0 text-[12px] text-muted">{budget}</span>
         </p>
         {/* In manual mode the controls themselves are two rows below, so restating them here would only add noise. */}
         {!manual && (
@@ -119,16 +234,18 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
             {sentence(presetTagline(current.value))} {current.description}
           </motion.p>
         )}
+        {/* The cost is already the value on the slider's own label row; repeating it here would make three copies
+            of one number in a card three lines tall. */}
         <p className="tabular mt-1.5 text-[11px] text-faint">
-          {steps} steps · {manual ? values.acceleration : current.acceleration} cache · books the GPU for {budget}
+          {steps} steps · {manual ? values.acceleration : current.acceleration} cache
         </p>
       </motion.div>
 
       {custom && (
         // The height transition is CSS on `--collapsible-panel-height` rather than a JS `height: auto` animation:
-        // Base UI has already measured the panel, and re-measuring it from JS on every frame inside a popover that is
-        // simultaneously being repositioned is exactly how a disclosure ends up stuttering.
-        <Collapsible.Root open={advanced} onOpenChange={setAdvanced} className="border-t border-line pt-2.5">
+        // Base UI has already measured the panel, and re-measuring it from JS on every frame is exactly how a
+        // disclosure ends up stuttering.
+        <Collapsible.Root open={advanced} onOpenChange={setAdvanced}>
           <Collapsible.Trigger className="group flex w-full items-center gap-1.5 text-[12px] text-muted transition-colors duration-100 hover:text-ink">
             Advanced
             <ChevronDown className="size-3.5 transition-transform duration-200 group-data-panel-open:rotate-180" />
@@ -141,7 +258,7 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
               "data-starting-style:h-0 data-ending-style:h-0",
             )}
           >
-            <div className="mt-3 flex flex-col gap-3">
+            <div className="mt-3.5 flex flex-col gap-4">
               <Switch
                 checked={manual}
                 onChange={(next) => update("preset", next ? custom.value : axis[lastOnAxis.current].value)}
@@ -156,9 +273,9 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -6 }}
                     transition={FADE}
-                    className="flex flex-col gap-3"
+                    className="flex flex-col gap-4"
                   >
-                    <CustomPresetControls values={values} update={update} />
+                    <ManualControls values={values} update={update} />
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -175,16 +292,18 @@ export function SpeedPanel({ config, values, update }: PanelProps) {
   );
 }
 
-function CustomPresetControls({ values, update }: { values: GenerationValues; update: Update }) {
+function ManualControls({ values, update }: { values: GenerationValues; update: Update }) {
   return (
     <>
-      <Field label="Scheduler steps" value={`${values.steps} steps`}>
+      <Field label="Scheduler steps" value={`${values.steps}`}>
         <Slider
           ariaLabel="Scheduler steps"
           min={4}
           max={40}
           value={values.steps}
           onChange={(next) => update("steps", next)}
+          minLabel="4"
+          maxLabel="40"
         />
       </Field>
 
@@ -216,7 +335,7 @@ function CustomPresetControls({ values, update }: { values: GenerationValues; up
       </Field>
 
       {values.loraPreset === "Custom" && (
-        <div className="flex flex-col gap-2.5">
+        <div className="flex flex-col gap-3">
           <Field label="LoRA repository">
             <TextInput
               placeholder="owner/repository"
@@ -243,6 +362,8 @@ function CustomPresetControls({ values, update }: { values: GenerationValues; up
             step={0.05}
             value={values.loraStrength}
             onChange={(next) => update("loraStrength", next)}
+            minLabel="0.00"
+            maxLabel="2.00"
           />
         </Field>
       )}
@@ -250,132 +371,28 @@ function CustomPresetControls({ values, update }: { values: GenerationValues; up
   );
 }
 
-export function FormatPanel({ config, values, update }: PanelProps) {
-  const groups = groupCanvases(config.canvases);
-  const canvas = findCanvas(config, values.canvas);
-  const activeGroup = groups.find((group) => group.options.some((option) => option.label === canvas.label)) ?? groups[0];
-  const tier = activeGroup.options.findIndex((option) => option.label === canvas.label);
+/* -------------------------------------------------------------------- seed */
 
+export function SeedSettings({ values, update }: Omit<SettingsProps, "config">) {
   return (
-    <div className="flex flex-col gap-3.5">
-      <Field label="Aspect ratio" value={activeGroup.ratio}>
-        <RadioGroup
-          aria-label="Aspect ratio"
-          value={activeGroup.ratio}
-          // Carry the size tier across ratios, so someone on "full" does not silently drop to "fast".
-          onValueChange={(next) => {
-            const group = groups.find((candidate) => candidate.ratio === next);
-            if (!group) return;
-            update("canvas", group.options[Math.min(Math.max(tier, 0), group.options.length - 1)].label);
-          }}
-          className="flex flex-wrap gap-1.5"
-        >
-          {groups.map((group) => {
-            const selected = group.ratio === activeGroup.ratio;
-            const landscape = group.value >= 1;
-            return (
-              <Radio.Root
-                key={group.ratio}
-                value={group.ratio}
-                className={cx(
-                  "flex min-w-[4.25rem] flex-1 cursor-pointer flex-col items-center gap-1.5 rounded-lg border px-2 py-2",
-                  "transition-colors duration-100",
-                  selected
-                    ? "border-accent/50 bg-accent/10 text-ink"
-                    : "border-line bg-sunken text-muted hover:border-line-strong hover:text-ink",
-                )}
-              >
-                {/* The box has to be square for the percentages below to describe the ratio they claim to. */}
-                <span aria-hidden className="grid size-6 place-items-center">
-                  <span
-                    className={cx(
-                      "block rounded-[3px] border transition-colors duration-100",
-                      selected ? "border-accent" : "border-line-strong",
-                    )}
-                    style={
-                      landscape
-                        ? { width: "100%", height: `${100 / group.value}%` }
-                        : { height: "100%", width: `${100 * group.value}%` }
-                    }
-                  />
-                </span>
-                <span className="tabular text-[11.5px] font-medium">{group.ratio}</span>
-              </Radio.Root>
-            );
-          })}
-        </RadioGroup>
-      </Field>
-
-      <Field label="Resolution" value={`${canvas.width} × ${canvas.height}`}>
-        <Segmented
-          ariaLabel="Resolution"
-          value={canvas.label}
-          onChange={(next) => update("canvas", next)}
-          options={activeGroup.options.map((option) => ({
-            value: option.label,
-            // The short edge is the familiar name for a video size (544p, 768p) regardless of orientation.
-            label: `${Math.min(option.width, option.height)}p`,
-            hint: option.fast ? "fast" : undefined,
-          }))}
-        />
-      </Field>
-
-      <p className="text-[11px] leading-[1.5] text-faint">
-        Attention cost grows with the square of the canvas, so a larger frame is much slower than a longer clip.
-      </p>
-    </div>
+    <Field label="Seed" hint="The same seed, prompt and settings reproduce the same clip. Step by one to explore near it.">
+      <NumberInput
+        ariaLabel="Seed"
+        min={0}
+        max={2 ** 31 - 1}
+        value={values.seed}
+        onChange={(next) => update("seed", next)}
+        onRandomise={() => update("seed", randomSeed())}
+      />
+    </Field>
   );
 }
 
-export function LengthPanel({ config, values, update }: PanelProps) {
-  const frames = snapFrames(values.duration);
-  const seconds = frames / FPS;
+/* --------------------------------------------------------------- keyframes */
 
+export function KeyframeSettings({ values, update }: Omit<SettingsProps, "config">) {
   return (
-    <div className="flex flex-col gap-3">
-      <Field label="Clip length" value={`${formatClock(seconds)} · ${frames} frames`}>
-        <Slider
-          ariaLabel="Clip length in seconds"
-          min={config.duration.min}
-          max={config.duration.max}
-          value={values.duration}
-          onChange={(next) => update("duration", next)}
-        />
-      </Field>
-      <p className="text-[11px] leading-[1.5] text-faint">
-        The video decoder only accepts <span className="tabular">17n + 5</span> frames at {FPS} fps, so lengths snap to
-        the next valid count — {values.duration} s becomes {seconds.toFixed(2)} s.
-      </p>
-    </div>
-  );
-}
-
-export function SeedPanel({ values, update }: Omit<PanelProps, "config">) {
-  return (
-    <div className="flex flex-col gap-3">
-      <Field label="Seed" hint="The same seed, prompt and settings reproduce the same clip.">
-        <div className="flex gap-2">
-          {/* Deliberately not `type="number"`: a nine-digit seed is never stepped one at a time, and the native
-              spinner would take up a third of the field to offer exactly that. */}
-          <TextInput
-            inputMode="numeric"
-            pattern="[0-9]*"
-            aria-label="Seed"
-            value={String(values.seed)}
-            onChange={(event) => update("seed", Number(event.target.value.replace(/\D/g, "").slice(0, 10)) || 0)}
-          />
-          <Button variant="outline" onClick={() => update("seed", randomSeed())} className="shrink-0">
-            <Dices className="size-4" /> Randomise
-          </Button>
-        </div>
-      </Field>
-    </div>
-  );
-}
-
-export function FramesPanel({ values, update }: Omit<PanelProps, "config">) {
-  return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2.5">
       <div className="grid grid-cols-2 gap-2">
         <KeyframeSlot
           label="First frame"
