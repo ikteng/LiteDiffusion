@@ -13,7 +13,14 @@ frame count is aligned to `17 * n + 5` before the call, since that arithmetic li
 """
 
 from diffusers.modular_pipelines.minimax_h3.before_encoder import MiniMaxH3Ref2VASetupStep
+from diffusers.modular_pipelines.minimax_h3.before_denoise import (
+    MiniMaxH3PrepareLatentsStep,
+    MiniMaxH3PrepareLayoutStep,
+    MiniMaxH3Ref2VAPrepareLayoutStep,
+    MiniMaxH3SetTimestepsStep,
+)
 from diffusers.modular_pipelines.minimax_h3.decoders import MiniMaxH3AfterDenoiseStep
+from diffusers.modular_pipelines.minimax_h3.denoise import MiniMaxH3DenoiseStep, MiniMaxH3Ref2VADenoiseStep
 from diffusers.modular_pipelines.minimax_h3.encoders import (
     MiniMaxH3Ref2VAReferenceEncoderStep,
     MiniMaxH3Ref2VATextEncoderStep,
@@ -22,13 +29,58 @@ from diffusers.modular_pipelines.minimax_h3.encoders import (
 from diffusers.modular_pipelines.minimax_h3.modular_blocks_minimax_h3 import (
     MiniMaxH3AutoKeyframeVaeEncoderStep,
     MiniMaxH3AutoResizeStep,
-    MiniMaxH3CoreDenoiseStep,
     MiniMaxH3DecodeStep,
-    MiniMaxH3Ref2VACoreDenoiseStep,
     _generation_outputs,
 )
 from diffusers.modular_pipelines.modular_pipeline import SequentialPipelineBlocks
 from diffusers.modular_pipelines.modular_pipeline_utils import OutputParam
+
+
+class _PreviewLoopMixin:
+    """The pinned Diffusers loop plus four non-authoritative TAE preview emissions."""
+
+    def __call__(self, components, state):
+        from h3_tae import maybe_emit_preview
+
+        block_state = self.get_block_state(state)
+        total = len(block_state.timesteps)
+        with self.progress_bar(total=total) as progress_bar:
+            for index, timestep in enumerate(block_state.timesteps):
+                components, block_state = self.loop_step(components, block_state, i=index, t=timestep)
+                maybe_emit_preview(components, block_state, index, total)
+                progress_bar.update()
+        self.set_block_state(state, block_state)
+        return components, state
+
+
+class MiniMaxH3PreviewDenoiseStep(_PreviewLoopMixin, MiniMaxH3DenoiseStep):
+    pass
+
+
+class MiniMaxH3Ref2VAPreviewDenoiseStep(_PreviewLoopMixin, MiniMaxH3Ref2VADenoiseStep):
+    pass
+
+
+class MiniMaxH3PreviewCoreDenoiseStep(SequentialPipelineBlocks):
+    model_name = "minimax-h3"
+    block_classes = [
+        MiniMaxH3PrepareLayoutStep,
+        MiniMaxH3PrepareLatentsStep,
+        MiniMaxH3SetTimestepsStep,
+        MiniMaxH3PreviewDenoiseStep,
+    ]
+    block_names = ["prepare_layout", "prepare_latents", "set_timesteps", "denoise"]
+
+
+class MiniMaxH3Ref2VAPreviewCoreDenoiseStep(SequentialPipelineBlocks):
+    model_name = "minimax-h3"
+    block_classes = [
+        MiniMaxH3Ref2VAPrepareLayoutStep,
+        MiniMaxH3PrepareLatentsStep,
+        MiniMaxH3SetTimestepsStep,
+        MiniMaxH3Ref2VAPreviewDenoiseStep,
+    ]
+    block_names = ["prepare_layout", "prepare_latents", "set_timesteps", "denoise"]
 
 
 def _wire_outputs(num_frames: bool = True) -> list[OutputParam]:
@@ -73,7 +125,7 @@ class MiniMaxH3GeneratorBlocks(SequentialPipelineBlocks):
     block_classes = [
         MiniMaxH3AutoResizeStep,
         MiniMaxH3AutoKeyframeVaeEncoderStep,
-        MiniMaxH3CoreDenoiseStep,
+        MiniMaxH3PreviewCoreDenoiseStep,
         MiniMaxH3AfterDenoiseStep,
         MiniMaxH3DecodeStep,
     ]
@@ -128,7 +180,7 @@ class MiniMaxH3Ref2VAGeneratorBlocks(SequentialPipelineBlocks):
     block_classes = [
         MiniMaxH3Ref2VASetupStep,
         MiniMaxH3Ref2VAReferenceEncoderStep,
-        MiniMaxH3Ref2VACoreDenoiseStep,
+        MiniMaxH3Ref2VAPreviewCoreDenoiseStep,
         MiniMaxH3AfterDenoiseStep,
         MiniMaxH3DecodeStep,
     ]

@@ -9,6 +9,8 @@
 diffusers @ git+https://github.com/huggingface/diffusers.git@665f578278365ea4a3318cb8c9b66ce6c01204b9
 torch==2.11.0
 torchvision==0.26.0
+# Ref2VA preserves each audio/video reference's native sample rate, then resamples it to the audio VAE rate.
+torchaudio==2.11.0
 # The Qwen3-VL processor decides the vision patch count, so a different minor changes the conditioning.
 transformers==5.8.0
 accelerate==1.14.0

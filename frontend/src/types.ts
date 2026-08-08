@@ -29,15 +29,37 @@ export type StudioConfig = {
   default_preset: string;
   custom_preset: string;
   examples: PromptExample[];
+  ref2va?: {
+    enabled: boolean;
+    max_total: number;
+    max_images: number;
+    max_videos: number;
+    max_audio: number;
+    minimum_duration: number;
+  };
+  tae_previews?: boolean;
 };
 
 export type Acceleration = "Balanced" | "Ultra Fast" | "Exact";
 export type LoraPreset = "None" | "Turbo · 4 steps" | "Turbo · 8 steps" | "Custom";
+export type ReferenceKind = "image" | "video" | "audio";
+export type ReferenceMode = "keyframes" | "omni";
+export type StudioMode = "single" | "storyboard";
+
+export type ReferenceAsset = {
+  id: string;
+  file: File;
+  kind: ReferenceKind;
+};
+
+export type StoryboardShot = { id: string; prompt: string };
 
 export type GenerationValues = {
   prompt: string;
   image: File | null;
   lastImage: File | null;
+  referenceMode: ReferenceMode;
+  references: ReferenceAsset[];
   canvas: string;
   duration: number;
   seed: number;
@@ -80,9 +102,11 @@ export type HistoryItem = GeneratedVideo & {
   /** Original FL2VA anchors, cloned by IndexedDB so Draft -> Final remains faithful after a reload. */
   sourceImage?: Blob | null;
   sourceLastImage?: Blob | null;
+  /** Ordered Ref2VA media, retained locally; never leaves the browser except for a requested generation. */
+  sourceReferences?: { name: string; type: string; blob: Blob }[];
 };
 
-export type GenerationRecipe = Omit<GenerationValues, "image" | "lastImage">;
+export type GenerationRecipe = Omit<GenerationValues, "image" | "lastImage" | "references">;
 
 export type RunPhase = "queue" | "conditioning" | "gpu" | "denoising" | "finalizing";
 
@@ -101,6 +125,8 @@ export type RunProgress = {
   unit?: string;
   exact?: boolean;
   phase?: RunPhase;
+  /** Approximate low-resolution TAE animation emitted while the full decoder is still pending. */
+  previewUrl?: string;
 };
 
 export type ModelStatus = {

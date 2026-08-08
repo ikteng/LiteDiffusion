@@ -1188,15 +1188,17 @@ class H3NVFP4Transformer(nn.Module):
         return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
 
 
-def load_transformer() -> H3NVFP4Transformer:
+def load_transformer(repo_id: str | None = None, filename: str | None = None) -> H3NVFP4Transformer:
     if torch.version.cuda is None or int(torch.version.cuda.split(".")[0]) < 13:
         raise RuntimeError("NVFP4 requires the CUDA 13 PyTorch build.")
     from huggingface_hub import hf_hub_download
 
-    path = hf_hub_download(repo_id=NVFP4_REPO, filename=NVFP4_FILE)
+    repo_id = repo_id or NVFP4_REPO
+    filename = filename or NVFP4_FILE
+    path = hf_hub_download(repo_id=repo_id, filename=filename)
     transformer = H3NVFP4Transformer()
     transformer.load(path)
-    print(f"[h3-nvfp4] loaded {NVFP4_REPO}/{NVFP4_FILE}", flush=True)
+    print(f"[h3-nvfp4] loaded {repo_id}/{filename}", flush=True)
     return transformer
 
 

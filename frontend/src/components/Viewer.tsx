@@ -186,8 +186,16 @@ function RunState({ progress }: { progress: RunProgress }) {
   return (
     <section
       aria-label="Generation progress"
-      className="flex size-full flex-col items-center justify-center gap-6 bg-sunken px-6"
+      className="flex size-full flex-col items-center justify-center gap-5 bg-sunken px-6"
     >
+      {progress.previewUrl && (
+        <div className="relative w-full max-w-sm overflow-hidden rounded-xl bg-black ring-1 ring-accent/35">
+          <img src={progress.previewUrl} alt="Approximate live generation preview" className="aspect-video w-full object-contain" />
+          <span className="absolute bottom-2 left-2 rounded-md bg-black/75 px-2 py-1 text-[10px] font-medium text-white backdrop-blur-sm">
+            Live TAE preview · final uses full VAE
+          </span>
+        </div>
+      )}
       <div className="w-full max-w-sm">
         {/* A finished phase fills left-to-right rather than switching colour, so the row reads as a track being
             covered — which is what the five phases actually are. */}

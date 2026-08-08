@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import mimetypes
 import os
 import re
 import shutil
 import socket
+import subprocess
 import tempfile
 import time
 import traceback
@@ -44,6 +46,8 @@ TURBO_4_LORA_FILE = "minimax_h3_fl2v_turbo_4step_v0.1.safetensors"
 TURBO_4_LORA_SCALE = 8 / 128
 TURBO_8_LORA_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
 TURBO_8_LORA_FILE = "minimax_h3_turbo_4step_ema_ckpt850.safetensors"
+REF2VA_REPO = os.environ.get("H3_REF2VA_REPO", "lilcheaty/MiniMax-H3-NVFP4")
+REF2VA_FILE = os.environ.get("H3_REF2VA_FILE", "minimax_h3_ref2va_pruned_nvfp4.safetensors")
 LORA_MAX_BYTES = 2 * 1024**3
 EGRID_COMMIT = "a7624b4c00626a8ae7e78860769389d706565190"
 EGRID_SHA256 = "30eb3c2cc7fb6b470d9717ff840d359313ac27cd64b705e32da1baa10f72d6a8"
@@ -140,8 +144,10 @@ def lower_duration_floor(seconds: float = MIN_UI_DURATION) -> None:
 
 
 PIPE = None
+REF_PIPE = None
 MANAGER = None
 COND_PIPE = None
+REF_COND_PIPE = None
 COND_ERROR: str | None = None
 LOAD_ERROR: str | None = None
 LOADED_IN: float | None = None
@@ -177,7 +183,8 @@ def status() -> str:
         conditioner_status = f"remote `{CONDITIONER_SPACE}`" + (" (local fallback)" if COND_ERROR else "")
     return (
         f"Ready · **{engine_status}** · VAEs full precision · placement `{PLACEMENT}` · attention `{ATTENTION}` · "
-        f"loaded in {LOADED_IN:.0f}s · conditioner {conditioner_status}"
+        f"loaded in {LOADED_IN:.0f}s · conditioner {conditioner_status} · "
+        f"Ref2VA {'ready' if REF_PIPE is not None and REF_COND_PIPE is not None else 'unavailable'} · TAE live previews"
     )
 
 
@@ -189,7 +196,7 @@ def load_models() -> str | None:
     Both autoencoders carry `_keep_in_fp32_modules` over every module and stay float32: a bfloat16 audio VAE decodes
     the soundtrack roughly 20 dB too quiet.
     """
-    global PIPE, MANAGER, COND_PIPE, COND_ERROR, LOAD_ERROR, LOADED_IN
+    global PIPE, REF_PIPE, MANAGER, COND_PIPE, REF_COND_PIPE, COND_ERROR, LOAD_ERROR, LOADED_IN
 
     if PIPE is not None or LOAD_ERROR is not None:
         return LOAD_ERROR
@@ -199,7 +206,7 @@ def load_models() -> str | None:
         import torch
         from diffusers import ComponentsManager
 
-        from h3_split_blocks import MiniMaxH3GeneratorBlocks
+        from h3_split_blocks import MiniMaxH3GeneratorBlocks, MiniMaxH3Ref2VAGeneratorBlocks
 
         lower_duration_floor()
         manager = ComponentsManager()
@@ -209,6 +216,7 @@ def load_models() -> str | None:
         # This is consumed by the endpoint's Gradio Progress tracker and forwarded across the ZeroGPU worker RPC,
         # producing one real queue update per denoising step.
         pipe.set_progress_bar_config(desc="Denoising")
+        ref_pipe = None
         if ENGINE == "nvfp4":
             # Do not download the 61.7 GiB BF16 transformer. The schedulers and full-precision VAEs stay canonical;
             # only the repeatedly executed DiT is replaced with the pruned Blackwell-native checkpoint.
@@ -219,6 +227,19 @@ def load_models() -> str | None:
             from h3_nvfp4 import load_transformer
 
             pipe.update_components(transformer=load_transformer())
+            ref_blocks = MiniMaxH3Ref2VAGeneratorBlocks()
+            ref_pipe = ref_blocks.init_pipeline(MODEL_REPO, components_manager=manager, collection="h3-ref")
+            shared = {
+                component.name: getattr(pipe, component.name)
+                for component in ref_blocks.expected_components
+                if component.name != "transformer_ref" and getattr(pipe, component.name, None) is not None
+            }
+            ref_pipe.update_components(
+                **shared,
+                transformer_ref=load_transformer(REF2VA_REPO, REF2VA_FILE),
+            )
+            ref_pipe.transformer_ref.set_attention_backend(ATTENTION)
+            ref_pipe.set_progress_bar_config(desc="Denoising")
         elif ENGINE == "bf16":
             pipe.load_components(dtype=torch.bfloat16)
         else:
@@ -243,15 +264,22 @@ def load_models() -> str | None:
             _arm_decode_hooks(pipe)
 
         cond_pipe = None
+        ref_cond_pipe = None
         if CONDITIONER_MODE == "local":
             try:
                 from h3_local_conditioner import load_local_conditioner
-                from h3_split_blocks import MiniMaxH3ConditionerBlocks
+                from h3_split_blocks import MiniMaxH3ConditionerBlocks, MiniMaxH3Ref2VAConditionerBlocks
 
                 print("[cond] loading the local truncated NVFP4-AWQ conditioner ...", flush=True)
                 text_encoder, tokenizer, processor = load_local_conditioner()
                 cond_pipe = MiniMaxH3ConditionerBlocks().init_pipeline(MODEL_REPO)
                 cond_pipe.update_components(
+                    text_encoder=text_encoder,
+                    tokenizer=tokenizer,
+                    processor=processor,
+                )
+                ref_cond_pipe = MiniMaxH3Ref2VAConditionerBlocks().init_pipeline(MODEL_REPO)
+                ref_cond_pipe.update_components(
                     text_encoder=text_encoder,
                     tokenizer=tokenizer,
                     processor=processor,
@@ -263,7 +291,10 @@ def load_models() -> str | None:
         elif CONDITIONER_MODE != "remote":
             raise ValueError(f"H3_CONDITIONER_MODE must be `local` or `remote`, got {CONDITIONER_MODE!r}")
 
-        PIPE, MANAGER, COND_PIPE = pipe, manager, cond_pipe
+        from h3_tae import load_preview_model
+
+        load_preview_model(OUTPUT_DIR)
+        PIPE, REF_PIPE, MANAGER, COND_PIPE, REF_COND_PIPE = pipe, ref_pipe, manager, cond_pipe, ref_cond_pipe
         LOADED_IN = time.time() - started
         print(f"[gen] ready in {LOADED_IN:.0f}s", flush=True)
     except Exception as error:
@@ -522,6 +553,15 @@ def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, heig
     latent_frames = (num_frames - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK * LATENTS_PER_CHUNK + 2
     patches = (height // 32) * (width // 32)
     rows = latent_frames * patches + (int(image is not None) + int(last_image is not None)) * patches
+    reference_specs = a[-1] if a and isinstance(a[-1], (list, tuple)) else []
+    if reference_specs:
+        # Ref2VA packs every reference beside the generated rows. Images are encoded at a 2048px short edge; videos
+        # occupy approximately one target-video block; audio adds two 40 Hz streams. This is deliberately conservative
+        # because under-booking a ZeroGPU request kills it after all earlier work has already been paid for.
+        kinds = [kind for _, kind in reference_specs]
+        rows += kinds.count("image") * 4096
+        rows += kinds.count("video") * latent_frames * patches
+        rows += kinds.count("audio") * int(num_frames / FPS * 80)
     denoise = steps * (_DUR_B * rows + _DUR_C * rows**2)
     decode = _DECODE_BASE + _DECODE_PER_DEFAULT_CANVAS * (height * width * num_frames) / _DEFAULT_CANVAS_PIXELS
     local_conditioning = 20 if prompt_embeds is None else 0
@@ -531,7 +571,7 @@ def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, heig
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
 def _generate(
     prompt, prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, acceleration,
-    lora_path, egrid_path, lora_strength, conditioning_cache_key,
+    lora_path, egrid_path, lora_strength, conditioning_cache_key, reference_specs,
 ):
     """The only thing on GPU time: local conditioning, packed denoising and the two decoders.
 
@@ -540,19 +580,46 @@ def _generate(
     """
     import torch
 
-    if COND_PIPE is not None and prompt_embeds is None:
-        COND_PIPE.text_encoder.to("cuda")
-    if PLACEMENT == "lazy":
-        PIPE.to("cuda")
-    elif PLACEMENT == "pack":
-        PIPE.vae.to("cuda")
-        PIPE.audio_vae.to("cuda")
+    use_ref2va = bool(reference_specs)
+    active_pipe = REF_PIPE if use_ref2va else PIPE
+    active_conditioner = REF_COND_PIPE if use_ref2va else COND_PIPE
+    if active_pipe is None:
+        raise RuntimeError("The Ref2VA engine is unavailable on this deployment.")
+    references = None
+    if use_ref2va:
+        from diffusers.modular_pipelines.minimax_h3 import (
+            MiniMaxH3AudioReference,
+            MiniMaxH3ImageReference,
+            MiniMaxH3VideoReference,
+        )
+
+        classes = {
+            "image": MiniMaxH3ImageReference,
+            "video": MiniMaxH3VideoReference,
+            "audio": MiniMaxH3AudioReference,
+        }
+        references = [classes[kind].from_file(path) for path, kind in reference_specs]
+
+    if active_conditioner is not None and prompt_embeds is None:
+        active_conditioner.text_encoder.to("cuda")
+    if PLACEMENT in ("lazy", "pack"):
+        # Only one 12.5 GB transformer needs to be active. Shared VAEs stay on the card across workflow switches.
+        inactive = PIPE if use_ref2va else REF_PIPE
+        inactive_transformer = (
+            getattr(inactive, "transformer", None) or getattr(inactive, "transformer_ref", None)
+            if inactive is not None
+            else None
+        )
+        inactive_device = getattr(inactive_transformer, "device", None)
+        if inactive_transformer is not None and inactive_device is not None and torch.device(inactive_device).type == "cuda":
+            inactive_transformer.to("cpu")
+        active_pipe.to("cuda")
 
     condition_seconds = None
     num_text_tokens = None
     condition_cache_hit = False
     if prompt_embeds is None:
-        if COND_PIPE is None:
+        if active_conditioner is None:
             raise RuntimeError(f"The local conditioner is unavailable: {COND_ERROR or 'disabled'}")
         cached = CONDITION_CACHE.pop(conditioning_cache_key, None) if conditioning_cache_key else None
         if cached is not None:
@@ -564,12 +631,22 @@ def _generate(
             print(f"[cond] reused {num_text_tokens}-token embedding", flush=True)
         else:
             conditioned = time.time()
-            condition_state = COND_PIPE(
-                prompt=prompt,
-                image=image,
-                last_image=last_image,
-                height=int(height),
-                width=int(width),
+            condition_state = (
+                active_conditioner(
+                    prompt=prompt,
+                    references=references,
+                    height=int(height),
+                    width=int(width),
+                    num_frames=int(num_frames),
+                )
+                if use_ref2va
+                else active_conditioner(
+                    prompt=prompt,
+                    image=image,
+                    last_image=last_image,
+                    height=int(height),
+                    width=int(width),
+                )
             )
             prompt_embeds = condition_state.get("prompt_embeds")
             text_token_tags = condition_state.get("text_token_tags")
@@ -582,30 +659,34 @@ def _generate(
                 while len(CONDITION_CACHE) > CONDITION_CACHE_SIZE:
                     CONDITION_CACHE.popitem(last=False)
 
-    activate_lora = getattr(PIPE.transformer, "activate_lora", None)
-    clear_lora = getattr(PIPE.transformer, "clear_lora", None)
+    active_transformer = active_pipe.transformer_ref if use_ref2va else active_pipe.transformer
+    activate_lora = getattr(active_transformer, "activate_lora", None)
+    clear_lora = getattr(active_transformer, "clear_lora", None)
     if lora_path and activate_lora is None:
         raise RuntimeError("LoRAs are supported only by the NVFP4 engine.")
     if activate_lora is not None:
         activate_lora(lora_path, egrid_path, float(lora_strength))
-    begin_request = getattr(PIPE.transformer, "begin_request", None)
-    end_request = getattr(PIPE.transformer, "end_request", None)
+    begin_request = getattr(active_transformer, "begin_request", None)
+    end_request = getattr(active_transformer, "end_request", None)
     if begin_request is not None:
         # MiniMaxH3Scheduler includes terminal sigma=0 in `num_inference_steps`, so N points execute N-1 forwards.
         begin_request(max(1, int(steps) - 1), acceleration)
     cache_stats = None
     try:
         with torch.inference_mode():
-            state = PIPE(
+            common = dict(
                 prompt_embeds=prompt_embeds.to("cuda", non_blocking=True),
                 text_token_tags=text_token_tags,
-                image=image,
-                last_image=last_image,
                 height=height,
                 width=width,
                 num_frames=num_frames,
                 num_inference_steps=int(steps),
                 generator=torch.Generator("cpu").manual_seed(int(seed)),
+            )
+            state = (
+                active_pipe(references=references, **common)
+                if use_ref2va
+                else active_pipe(image=image, last_image=last_image, **common)
             )
     finally:
         if end_request is not None:
@@ -641,7 +722,8 @@ def _generate_with_hardware_retry(*args):
 def generate(
     prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42,
     upsample=False, acceleration="Balanced", lora_preset="None", lora_repo="", lora_filename="",
-    lora_strength=1.0, generation_preset=CUSTOM_PRESET, ip_token=None, progress=gr.Progress(track_tqdm=True),
+    lora_strength=1.0, generation_preset=CUSTOM_PRESET, references=None, ip_token=None,
+    progress=gr.Progress(track_tqdm=True),
 ):
     """One request. The appended UI preset leaves older positional API parameters intact."""
     if LOAD_ERROR:
@@ -667,14 +749,58 @@ def generate(
             return value.get("path")
         return getattr(value, "path", value)
 
+    def reference_kind(value, path):
+        mime = ""
+        if isinstance(value, dict):
+            mime = value.get("mime_type") or ""
+        else:
+            mime = getattr(value, "mime_type", "") or ""
+        mime = mime or mimetypes.guess_type(str(path))[0] or ""
+        if mime.startswith("image/"):
+            return "image"
+        if mime.startswith("video/"):
+            return "video"
+        if mime.startswith("audio/"):
+            return "audio"
+        raise ValueError(f"Unsupported reference file {os.path.basename(str(path))!r}; use an image, video or audio file.")
+
     image_path, last_image_path = input_path(image_path), input_path(last_image_path)
+    reference_specs = []
+    for reference in references or []:
+        path = input_path(reference)
+        if path:
+            reference_specs.append((path, reference_kind(reference, path)))
+    use_ref2va = bool(reference_specs)
+    if use_ref2va:
+        if image_path or last_image_path:
+            raise ValueError("Choose keyframes or omni references for one shot, not both.")
+        if len(reference_specs) > 12:
+            raise ValueError("MiniMax-H3 accepts at most 12 ordered references.")
+        counts = {kind: sum(spec_kind == kind for _, spec_kind in reference_specs) for kind in ("image", "video", "audio")}
+        for kind, limit in (("image", 9), ("video", 3), ("audio", 3)):
+            if counts[kind] > limit:
+                raise ValueError(f"MiniMax-H3 accepts at most {limit} {kind} references.")
+        if counts["audio"] and not (counts["image"] or counts["video"]):
+            raise ValueError("Audio references need at least one image or video reference.")
+        if float(duration) < 5:
+            raise ValueError("Ref2VA clips must be at least 5 seconds long.")
+        if upsample:
+            raise ValueError("Prompt enhancement is not yet available for Ref2VA; turn Enhance off.")
+        if REF_PIPE is None or REF_COND_PIPE is None:
+            raise RuntimeError("The local Ref2VA engine or conditioner is unavailable.")
+        # FL2VA Turbo adapters do not target the reference checkpoint. Ref2VA retains the quality schedule and the
+        # conservative cache engine until a validated Ref2VA distillation is available.
+        steps, displayed_steps = 28, 28
+        acceleration = "Balanced"
+        lora_preset = "None"
+        generation_preset = "Ref2VA 28-step — ordered references"
     if image_path:
         image_path, canvas = _fit_keyframe(image_path, canvas)
     if last_image_path:
         last_image_path, canvas = _fit_keyframe(last_image_path, canvas)
 
     requested_steps = int(steps)
-    displayed_steps = requested_steps
+    displayed_steps = locals().get("displayed_steps", requested_steps)
     if lora_preset == "Turbo · 4 steps":
         # The native scheduler includes its terminal zero in this count; 5 points produce 4 exact Euler evaluations.
         steps, displayed_steps = 5, 4
@@ -712,7 +838,7 @@ def generate(
 
     # Prompt rewriting needs the discarded LM head and decoder tail, so it intentionally retains the remote path.
     # Normal generation—the default—keeps embeddings on this worker and never serializes them through another API.
-    if upsample or COND_PIPE is None:
+    if upsample or (COND_PIPE is None and not use_ref2va):
         progress(
             0.0,
             desc=f"Upsampling and conditioning on {CONDITIONER_SPACE} ..."
@@ -732,7 +858,7 @@ def generate(
 
     progress(
         0.1,
-        desc=("Local conditioning + " if prompt_embeds is None else "")
+        desc=("Local Ref2VA conditioning + " if use_ref2va else "Local conditioning + " if prompt_embeds is None else "")
         + f"denoising {displayed_steps} steps at {width}x{height}, {num_frames} frames ...",
     )
     started = time.time()
@@ -750,6 +876,7 @@ def generate(
                     str(height),
                     _sha256(image_path) if image_path else "",
                     _sha256(last_image_path) if last_image_path else "",
+                    *(_sha256(path) for path, _ in reference_specs),
                 ]
             ).encode()
         ).hexdigest()
@@ -769,6 +896,7 @@ def generate(
             egrid_path,
             float(lora_strength) * adapter_scale,
             conditioning_key,
+            reference_specs,
         )
     finally:
         LocalContext.progress.reset(progress_token)
@@ -892,6 +1020,7 @@ def generate_api(
     lora_filename: str = "",
     lora_strength: float = 1.0,
     generation_preset: str = DEFAULT_PRESET,
+    references: list[FileData] | None = None,
     request: Request = None,
 ) -> tuple[FileData, str, str]:
     """Queued generation endpoint used by both the React studio and ordinary gradio_client callers."""
@@ -911,8 +1040,52 @@ def generate_api(
         lora_filename,
         lora_strength,
         generation_preset,
+        references,
         ip_token=ip_token,
     )
+
+
+@app.api(name="stitch")
+def stitch_api(clips: list[FileData]) -> FileData:
+    """Join completed storyboard shots without another GPU allocation.
+
+    Every H3 clip already has the same frame and audio rates. Re-encoding keeps the endpoint resilient to different
+    canvas/pixel formats and trims one duplicated continuation frame from every shot after the first.
+    """
+    paths = [input.path if hasattr(input, "path") else input.get("path") for input in clips or []]
+    paths = [str(path) for path in paths if path]
+    if not 2 <= len(paths) <= 12:
+        raise ValueError("A storyboard must contain between 2 and 12 completed shots.")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output = os.path.join(OUTPUT_DIR, f"h3-story-{int(time.time() * 1000)}.mp4")
+    command = ["ffmpeg", "-y", "-loglevel", "error"]
+    for path in paths:
+        command.extend(["-i", path])
+    chains = []
+    concat_inputs = []
+    seam = 1 / FPS
+    for index in range(len(paths)):
+        trim = "" if index == 0 else f"trim=start={seam},"
+        atrim = "" if index == 0 else f"atrim=start={seam},"
+        chains.append(
+            f"[{index}:v]{trim}setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            f"fps={FPS},format=yuv420p[v{index}]"
+        )
+        chains.append(f"[{index}:a]{atrim}asetpts=PTS-STARTPTS,aresample=48000[a{index}]")
+        concat_inputs.append(f"[v{index}][a{index}]")
+    chains.append(f"{''.join(concat_inputs)}concat=n={len(paths)}:v=1:a=1[v][a]")
+    command.extend(
+        [
+            "-filter_complex", ";".join(chains), "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", output,
+        ]
+    )
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=300)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"Could not assemble the storyboard: {error.stderr[-800:]}") from error
+    return FileData(path=output)
 
 
 @app.get("/status")
@@ -945,6 +1118,15 @@ def studio_config():
         "default_preset": DEFAULT_PRESET,
         "custom_preset": CUSTOM_PRESET,
         "examples": EXAMPLES,
+        "ref2va": {
+            "enabled": REF_PIPE is not None and REF_COND_PIPE is not None,
+            "max_total": 12,
+            "max_images": 9,
+            "max_videos": 3,
+            "max_audio": 3,
+            "minimum_duration": 5,
+        },
+        "tae_previews": True,
     }
 
 

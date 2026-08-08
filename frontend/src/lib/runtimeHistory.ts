@@ -70,7 +70,9 @@ export function runtimeSampleFor(
     height: canvas.height,
     frames: snapFrames(values.duration),
     steps,
-    keyframes: Number(values.image != null) + Number(values.lastImage != null),
+    keyframes: values.referenceMode === "omni"
+      ? values.references.reduce((sum, reference) => sum + (reference.kind === "video" ? 5 : 1), 0)
+      : Number(values.image != null) + Number(values.lastImage != null),
     upsample: values.upsample,
     seconds,
     createdAt: Date.now(),
@@ -115,7 +117,9 @@ export function estimateRuntime(
     height: canvas.height,
     frames: snapFrames(values.duration),
     steps,
-    keyframes: Number(values.image != null) + Number(values.lastImage != null),
+    keyframes: values.referenceMode === "omni"
+      ? values.references.reduce((sum, reference) => sum + (reference.kind === "video" ? 5 : 1), 0)
+      : Number(values.image != null) + Number(values.lastImage != null),
   };
   const targetWork = work(target);
   const matches = samples

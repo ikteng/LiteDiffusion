@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchModelStatus, fetchStudioConfig, runGeneration } from "./api";
+import { fetchModelStatus, fetchStudioConfig, runGeneration, stitchVideos } from "./api";
 import { AboutSheet } from "./components/AboutSheet";
 import { ComposeRail } from "./components/ComposeRail";
 import { Header } from "./components/Header";
@@ -11,17 +11,32 @@ import { deleteHistoryItem, restoreHistory, saveHistoryItem } from "./lib/histor
 import { estimateRuntime, loadRuntimeSamples, rememberRuntime, runtimeSampleFor } from "./lib/runtimeHistory";
 import { findCanvas, snapFrames, FPS } from "./lib/studio";
 import { draftValues, finalFrameFile, finalValues, recipeFrom, remixValues, valuesFromHistory } from "./lib/workflows";
-import type { GenerationValues, HistoryItem, ModelStatus, RunProgress, StudioConfig } from "./types";
+import type { GenerationValues, HistoryItem, ModelStatus, RunProgress, StoryboardShot, StudioConfig, StudioMode } from "./types";
 import { FALLBACK_CONFIG } from "./types";
 
 const IDLE: RunProgress = { stage: "idle", label: "Ready", progress: null };
 const STATUS_POLL_MS = 15_000;
+
+function storedMode(): StudioMode {
+  try { return localStorage.getItem("h3-studio-mode") === "storyboard" ? "storyboard" : "single"; }
+  catch { return "single"; }
+}
+
+function storedShots(): StoryboardShot[] {
+  const fresh = () => [{ id: crypto.randomUUID(), prompt: "" }, { id: crypto.randomUUID(), prompt: "" }];
+  try {
+    const parsed = JSON.parse(localStorage.getItem("h3-storyboard") || "null");
+    return Array.isArray(parsed) && parsed.length >= 2 ? parsed : fresh();
+  } catch { return fresh(); }
+}
 
 function initialValues(config: StudioConfig): GenerationValues {
   return {
     prompt: "",
     image: null,
     lastImage: null,
+    referenceMode: "keyframes",
+    references: [],
     canvas: config.default_canvas,
     duration: config.duration.default,
     seed: 42,
@@ -50,6 +65,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [usageOpen, setUsageOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [mode, setMode] = useState<StudioMode>(storedMode);
+  const [shots, setShots] = useState<StoryboardShot[]>(storedShots);
+  const [storyClips, setStoryClips] = useState<HistoryItem[]>([]);
   const viewerRef = useRef<HTMLDivElement>(null);
 
   const running =
@@ -122,6 +140,9 @@ export default function App() {
     values.loraStrength,
   ]);
 
+  useEffect(() => { try { localStorage.setItem("h3-studio-mode", mode); } catch { /* optional */ } }, [mode]);
+  useEffect(() => { try { localStorage.setItem("h3-storyboard", JSON.stringify(shots)); } catch { /* optional */ } }, [shots]);
+
   const update = useCallback(
     <K extends keyof GenerationValues>(key: K, value: GenerationValues[K]) =>
       setValues((current) => ({ ...current, [key]: value })),
@@ -154,6 +175,7 @@ export default function App() {
         recipe: recipeFrom(requestValues),
         sourceImage: requestValues.image,
         sourceLastImage: requestValues.lastImage,
+        sourceReferences: requestValues.references.map((reference) => ({ name: reference.file.name, type: reference.file.type, blob: reference.file })),
       };
       setHistory((current) => [item, ...current]);
       // The UI can show the result immediately; durable browser storage continues without delaying completion.
@@ -164,6 +186,67 @@ export default function App() {
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Generation failed. Please try again.";
       setError(message);
+      setProgress({ stage: "error", label: message, progress: null });
+    }
+  }
+
+  async function generateStoryboard(draft: boolean) {
+    const authored = shots.filter((shot) => shot.prompt.trim());
+    if (running || authored.length < 2) return;
+    setError(null); setStoryClips([]);
+    viewerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const completed: HistoryItem[] = [];
+    let continuation: File | null = null;
+    try {
+      for (let index = 0; index < authored.length; index++) {
+        let requestValues: GenerationValues = {
+          ...values,
+          prompt: authored[index].prompt,
+          seed: values.seed + index,
+          image: index === 0 ? values.image : continuation,
+          lastImage: index === authored.length - 1 ? values.lastImage : null,
+        };
+        if (draft) requestValues = draftValues(requestValues, config);
+        if (requestValues.referenceMode === "omni" && continuation) {
+          requestValues = {
+            ...requestValues, image: null, lastImage: null,
+            references: [{ id: `continuity-${index}`, file: continuation, kind: "image" }, ...requestValues.references],
+          };
+        }
+        const estimate = estimateRuntime(runtimeSamples, config, requestValues);
+        const result = await runGeneration(requestValues, (next) => setProgress({
+          ...next,
+          label: `Shot ${index + 1}/${authored.length} · ${next.label}`,
+          progress: next.progress == null ? index / authored.length : (index + next.progress) / authored.length,
+        }), estimate);
+        const item: HistoryItem = {
+          ...result,
+          id: crypto.randomUUID(), createdAt: Date.now() + index,
+          prompt: requestValues.prompt, canvas: findCanvas(config, requestValues.canvas),
+          seconds: snapFrames(requestValues.duration) / FPS, seed: requestValues.seed,
+          preset: `Shot ${index + 1} · ${requestValues.preset}`, recipe: recipeFrom(requestValues),
+          sourceImage: requestValues.image, sourceLastImage: requestValues.lastImage,
+          sourceReferences: requestValues.references.map((r) => ({ name: r.file.name, type: r.file.type, blob: r.file })),
+        };
+        completed.push(item); setStoryClips([...completed]);
+        setHistory((current) => [item, ...current]); void saveHistoryItem(item);
+        continuation = await finalFrameFile(result.url);
+      }
+      setProgress({ stage: "generating", phase: "finalizing", label: "Assembling storyboard", progress: .98 });
+      const url = await stitchVideos(completed.map((item) => item.url));
+      const film: HistoryItem = {
+        ...completed[0], id: crypto.randomUUID(), createdAt: Date.now(), url,
+        prompt: `Storyboard · ${authored.map((shot) => shot.prompt).join(" / ")}`,
+        seconds: completed.reduce((sum, item) => sum + item.seconds, 0),
+        preset: `Storyboard · ${draft ? "Draft" : "Final"}`,
+        report: `${completed.length} connected shots · ${completed.reduce((sum, item) => sum + item.seconds, 0).toFixed(1)} s · CPU assembled`,
+        runtimeSeconds: completed.reduce((sum, item) => sum + item.runtimeSeconds, 0),
+      };
+      setHistory((current) => [film, ...current]); setSelectedId(film.id); void saveHistoryItem(film);
+      setProgress({ stage: "complete", label: "Storyboard complete", progress: 1, exact: true });
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Storyboard generation failed.";
+      setError(completed.length ? `${message} Your ${completed.length} completed shot${completed.length === 1 ? " is" : "s are"} saved below.` : message);
       setProgress({ stage: "error", label: message, progress: null });
     }
   }
@@ -209,15 +292,19 @@ export default function App() {
     <div className="flex min-h-dvh flex-col lg:h-dvh lg:overflow-hidden">
       <Header model={model} onOpenUsage={() => setUsageOpen(true)} onOpenAbout={() => setAboutOpen(true)} />
 
-      <main className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
-        <div className="min-h-0 border-line lg:border-r">
+      <main className="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(0,1fr)] lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
+        <div className="min-h-0 min-w-0 border-line lg:border-r">
           <ComposeRail
             config={config}
             values={values}
             update={update}
             onApplyExample={applyExample}
-            onGenerate={() => void generate()}
-            onGenerateDraft={() => void generate(draftValues(values, config))}
+            onGenerate={() => mode === "storyboard" ? void generateStoryboard(false) : void generate()}
+            onGenerateDraft={() => mode === "storyboard" ? void generateStoryboard(true) : void generate(draftValues(values, config))}
+            mode={mode}
+            onModeChange={setMode}
+            shots={shots}
+            onShotsChange={setShots}
             running={running}
             blockedReason={blockedReason}
             runtimeEstimate={runtimeEstimate}
@@ -242,6 +329,17 @@ export default function App() {
             onContinue={(item) => void continueFrom(item)}
             onRemix={remix}
           />
+          {mode === "storyboard" && storyClips.length > 0 && (
+            <section className="mt-3 shrink-0 rounded-xl bg-sunken p-3 ring-1 ring-inset ring-line">
+              <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-[.1em] text-faint">Storyboard timeline</p>
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {storyClips.map((clip, index) => <button key={clip.id} onClick={() => setSelectedId(clip.id)} className="w-36 shrink-0 overflow-hidden rounded-lg bg-black ring-1 ring-line">
+                  <video src={`${clip.url}#t=.1`} muted preload="metadata" className="aspect-video w-full object-cover" />
+                  <span className="block truncate px-2 py-1.5 text-left text-[10.5px] text-muted">{index + 1}. {clip.prompt}</span>
+                </button>)}
+              </div>
+            </section>
+          )}
           <History
             items={history}
             selectedId={selectedId}

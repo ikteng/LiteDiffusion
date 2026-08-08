@@ -5,14 +5,16 @@ import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
 import { FADE, POP } from "../lib/motion";
 import { findPreset, formatBudget } from "../lib/studio";
-import type { GenerationValues, RuntimeEstimate, StudioConfig } from "../types";
+import type { GenerationValues, RuntimeEstimate, StoryboardShot, StudioConfig, StudioMode } from "../types";
 import { Button } from "../ui/Button";
 import { Section } from "../ui/Section";
+import { Segmented } from "../ui/Segmented";
+import { ReferenceLibrary } from "./ReferenceLibrary";
+import { StoryboardEditor } from "./StoryboardEditor";
 import {
   budgetFor,
   fasterOption,
   FormatSettings,
-  KeyframeSettings,
   LengthSettings,
   SeedSettings,
   SpeedSettings,
@@ -25,6 +27,10 @@ type Props = {
   onApplyExample: (prompt: string, canvas: string) => void;
   onGenerate: () => void;
   onGenerateDraft: () => void;
+  mode: StudioMode;
+  onModeChange: (mode: StudioMode) => void;
+  shots: StoryboardShot[];
+  onShotsChange: (shots: StoryboardShot[]) => void;
   running: boolean;
   /** Non-null when generating is impossible right now — shown in place of the GPU estimate. */
   blockedReason: string | null;
@@ -50,6 +56,10 @@ export function ComposeRail({
   onApplyExample,
   onGenerate,
   onGenerateDraft,
+  mode,
+  onModeChange,
+  shots,
+  onShotsChange,
   running,
   blockedReason,
   runtimeEstimate,
@@ -59,7 +69,9 @@ export function ComposeRail({
   const steps = preset.custom ? values.steps : preset.steps;
   const budget = budgetFor(config, values, steps);
   const faster = fasterOption(config, values);
-  const ready = values.prompt.trim().length > 0 && !running && !blockedReason;
+  const hasPrompt = mode === "storyboard" ? shots.length >= 2 && shots.every((shot) => shot.prompt.trim()) : values.prompt.trim().length > 0;
+  const validReferences = values.referenceMode !== "omni" || (values.references.some((r) => r.kind !== "audio") && values.references.length > 0);
+  const ready = hasPrompt && validReferences && !running && !blockedReason;
 
   // Grow the prompt with its content instead of scrolling inside a fixed box, up to a point where the rail takes over.
   useEffect(() => {
@@ -72,6 +84,12 @@ export function ComposeRail({
   return (
     <div className="flex min-h-0 flex-col lg:h-full">
       <div className="scrollbar-slim divide-y divide-line lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain">
+        <div className="p-4 pb-3">
+          <Segmented ariaLabel="Creation mode" value={mode} onChange={onModeChange} options={[
+            { value: "single", label: "Single shot" },
+            { value: "storyboard", label: "Storyboard", hint: `${shots.length} shots` },
+          ]} />
+        </div>
         <Section
           title="Speed"
           tone="accent"
@@ -102,6 +120,8 @@ export function ComposeRail({
         >
           <SpeedSettings config={config} values={values} update={update} runtimeEstimate={runtimeEstimate} />
         </Section>
+
+        {mode === "storyboard" ? <Section title="Storyboard" defaultOpen><StoryboardEditor shots={shots} onChange={onShotsChange} /></Section> : <>
 
         <Section
           title="Prompt"
@@ -163,9 +183,10 @@ export function ComposeRail({
             ))}
           </div>
         </Section>
+        </>}
 
         <Section title="References" defaultOpen>
-          <KeyframeSettings values={values} update={update} />
+          <ReferenceLibrary config={config} values={values} update={update} />
         </Section>
 
         <Section title="Format" defaultOpen={false}>
@@ -202,13 +223,13 @@ export function ComposeRail({
           </AnimatePresence>
         </div>
 
-        <Button variant="outline" size="lg" disabled={!ready} onClick={onGenerateDraft}>
+        <Button variant="outline" size="lg" disabled={!ready || values.referenceMode === "omni"} onClick={onGenerateDraft} title={values.referenceMode === "omni" ? "Ref2VA uses the full quality schedule" : undefined}>
           {running ? <Loader2 className="animate-spin" /> : <Clapperboard />}
           Draft
         </Button>
         <Button variant="primary" size="lg" disabled={!ready} onClick={onGenerate}>
           {running ? <Loader2 className="animate-spin" /> : <Zap fill="currentColor" />}
-          {running ? "Generating…" : "Generate"}
+          {running ? "Generating…" : mode === "storyboard" ? `Render ${shots.length} shots` : "Generate"}
         </Button>
       </div>
     </div>

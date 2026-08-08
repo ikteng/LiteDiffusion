@@ -70,8 +70,9 @@ async function deleteIds(database: IDBDatabase, ids: string[]): Promise<void> {
   await transactionDone(transaction);
 }
 
-function clipBytes(clip: Pick<StoredClip, "video" | "sourceImage" | "sourceLastImage">): number {
-  return clip.video.size + (clip.sourceImage?.size ?? 0) + (clip.sourceLastImage?.size ?? 0);
+function clipBytes(clip: Pick<StoredClip, "video" | "sourceImage" | "sourceLastImage" | "sourceReferences">): number {
+  return clip.video.size + (clip.sourceImage?.size ?? 0) + (clip.sourceLastImage?.size ?? 0)
+    + (clip.sourceReferences ?? []).reduce((sum, reference) => sum + reference.blob.size, 0);
 }
 
 /** Save the actual MP4, pruning before the write so one large clip cannot grow storage without bound. */
@@ -84,7 +85,8 @@ export async function saveHistoryItem(item: HistoryItem): Promise<void> {
   const database = await openHistory();
   try {
     const existing = (await storedClips(database)).filter((clip) => clip.id !== item.id);
-    let bytes = video.size + (item.sourceImage?.size ?? 0) + (item.sourceLastImage?.size ?? 0);
+    let bytes = video.size + (item.sourceImage?.size ?? 0) + (item.sourceLastImage?.size ?? 0)
+      + (item.sourceReferences ?? []).reduce((sum, reference) => sum + reference.blob.size, 0);
     const keep: StoredClip[] = [];
     for (const clip of existing) {
       if (keep.length + 1 >= MAX_CLIPS || bytes + clipBytes(clip) > MAX_BYTES) continue;

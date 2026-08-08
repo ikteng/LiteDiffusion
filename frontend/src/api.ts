@@ -71,10 +71,13 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
   }
   // Gradio 6 emits explicit gr.Progress packets with stage="pending" even after execution starts.
   if (message.stage === "generating" || message.stage === "streaming" || isProgressPacket) {
+    const previewParts = progressItem?.desc?.startsWith("TAE_PREVIEW|")
+      ? progressItem.desc.split("|", 3)
+      : null;
     const trackedStep = progressItem?.index != null && progressItem.length != null && progressItem.length > 0;
     const rawFraction = progressItem?.progress ?? (trackedStep ? progressItem.index! / progressItem.length! : null);
     const gpuInitialization = progressItem?.desc === "ZeroGPU init";
-    const denoising = trackedStep && !gpuInitialization;
+    const denoising = (trackedStep && !gpuInitialization) || Boolean(previewParts);
     const gpuPreflight = !trackedStep && progressItem?.desc?.toLowerCase().includes("denoising") === true;
     let phase: RunProgress["phase"] = denoising
       ? "denoising"
@@ -106,7 +109,7 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
     return {
       stage: "generating",
       label: denoising
-        ? progressItem?.desc || "Denoising video and audio"
+        ? previewParts?.[2] || progressItem?.desc || "Denoising video and audio"
         : phase === "finalizing"
           ? "Finalizing video and audio"
           : phase === "gpu"
@@ -121,6 +124,7 @@ function statusLabel(message: StatusMessage, startedAt: number, previous: RunPro
       unit: progressItem?.unit ?? undefined,
       exact,
       phase,
+      previewUrl: previewParts?.[1] || previous.previewUrl,
     };
   }
   if (message.stage === "complete") {
@@ -172,8 +176,8 @@ export async function runGeneration(
   const client = await getClient();
   const submission = client.submit("/generate", {
     prompt: values.prompt,
-    image_path: values.image ? handle_file(values.image) : null,
-    last_image_path: values.lastImage ? handle_file(values.lastImage) : null,
+    image_path: values.referenceMode === "keyframes" && values.image ? handle_file(values.image) : null,
+    last_image_path: values.referenceMode === "keyframes" && values.lastImage ? handle_file(values.lastImage) : null,
     canvas: values.canvas,
     duration: values.duration,
     steps: values.steps,
@@ -185,6 +189,8 @@ export async function runGeneration(
     lora_filename: values.loraFilename,
     lora_strength: values.loraStrength,
     generation_preset: values.preset,
+    references:
+      values.referenceMode === "omni" ? values.references.map((reference) => handle_file(reference.file)) : [],
   });
 
   let result: unknown[] | null = null;
@@ -231,4 +237,21 @@ export async function runGeneration(
     refinedPrompt: String(result[2] ?? ""),
     runtimeSeconds: (Date.now() - (runtimeStartedAt ?? startedAt)) / 1000,
   };
+}
+
+/** Assemble generated storyboard shots on the CPU endpoint, so editing never books another GPU. */
+export async function stitchVideos(urls: string[]): Promise<string> {
+  const { handle_file } = await import("@gradio/client");
+  const files = await Promise.all(
+    urls.map(async (url, index) => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Could not read storyboard shot ${index + 1}.`);
+      return new File([await response.blob()], `shot-${index + 1}.mp4`, { type: "video/mp4" });
+    }),
+  );
+  const client = await getClient();
+  const result = await client.predict("/stitch", { clips: files.map(handle_file) });
+  const data = unwrapServerOutput(Array.isArray(result.data) ? result.data : [result.data]);
+  if (!data.length) throw new Error("The storyboard assembler returned no video.");
+  return outputUrl(data[0] as FilePayload | string);
 }

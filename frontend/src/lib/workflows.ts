@@ -11,7 +11,7 @@ function fileFromBlob(blob: Blob | null | undefined, name: string): File | null 
 
 /** Store every authored setting so a clip is a reusable project, not merely an MP4. */
 export function recipeFrom(values: GenerationValues): GenerationRecipe {
-  const { image: _image, lastImage: _lastImage, ...recipe } = values;
+  const { image: _image, lastImage: _lastImage, references: _references, ...recipe } = values;
   return recipe;
 }
 
@@ -29,6 +29,7 @@ function legacyRecipe(item: HistoryItem, config: StudioConfig): GenerationRecipe
     loraRepo: "",
     loraFilename: "",
     loraStrength: 1,
+    referenceMode: "keyframes",
   };
 }
 
@@ -39,6 +40,11 @@ export function valuesFromHistory(item: HistoryItem, config: StudioConfig): Gene
     canvas: findCanvas(config, recipe.canvas).label,
     image: fileFromBlob(item.sourceImage, "first-frame.png"),
     lastImage: fileFromBlob(item.sourceLastImage, "last-frame.png"),
+    references: (item.sourceReferences ?? []).map((reference, index) => ({
+      id: `${item.id}-ref-${index}`,
+      file: new File([reference.blob], reference.name, { type: reference.type }),
+      kind: reference.type.startsWith("video/") ? "video" : reference.type.startsWith("audio/") ? "audio" : "image",
+    })),
   };
 }
 

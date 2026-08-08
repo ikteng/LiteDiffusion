@@ -11,6 +11,7 @@ const LINKS = [
   ["NVFP4 checkpoint", "https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4"],
   ["4-step Turbo LoRA", "https://huggingface.co/lightx2v/Minimax-h3-Turbo"],
   ["Sana / Sol-Engine", "https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3/optimized"],
+  ["H3 TAE previews", "https://huggingface.co/Kijai/MiniMax-H3-TAE"],
 ];
 
 /**
@@ -101,6 +102,24 @@ export function AboutSheet({ open, onClose }: { open: boolean; onClose: () => vo
           </P>
           <P className="text-faint">
             All of this is inference-work caching, not result caching. Every prompt and seed starts from fresh latents.
+          </P>
+        </Part>
+
+        <Part title="Creative workflows">
+          <P>
+            <Term>Reference studio</Term> runs MiniMax-H3’s Ref2VA checkpoint with up to 12 ordered references: nine
+            images, three videos and three audio files within that total. Reference order is preserved through both
+            the local Qwen conditioner and the joint video/audio denoiser. It stays on the full 28-step quality path.
+          </P>
+          <P>
+            <Term>Storyboard</Term> renders shots in order, captures each finished clip’s last frame locally, and uses
+            it to anchor the next shot. The clips are joined on CPU with a one-frame seam trim, so assembly does not
+            consume another ZeroGPU allocation. Shot recipes and source references remain in browser history.
+          </P>
+          <P>
+            <Term>TAE live preview</Term> decodes a tiny animated approximation at denoising milestones. It adds a
+            little work but gives useful visual feedback before the full video and audio VAEs finish; exported frames
+            always come from the original full-precision VAE.
           </P>
         </Part>
 
