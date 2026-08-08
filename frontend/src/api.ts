@@ -10,15 +10,67 @@ import type {
 } from "./types";
 import { FALLBACK_CONFIG } from "./types";
 
+declare global {
+  interface Window {
+    supports_zerogpu_headers?: boolean;
+  }
+}
+
 type FilePayload = { url?: string; path?: string; name?: string; data?: string };
 
 let clientPromise: Promise<Client> | null = null;
 
 function getClient() {
-  clientPromise ??= import("@gradio/client").then(({ Client }) =>
-    Client.connect(window.location.origin, { events: ["data", "status"] }),
-  );
+  if (!clientPromise) {
+    clientPromise = import("@gradio/client")
+      .then(({ Client }) => Client.connect(window.location.origin, { events: ["data", "status"] }))
+      .catch((error) => {
+        clientPromise = null;
+        throw error;
+      });
+  }
   return clientPromise;
+}
+
+/**
+ * Initialize Gradio's Hugging Face parent-frame handshake while the user is still composing.
+ *
+ * If the client is first imported only after Generate is clicked, the queue request can race the parent's
+ * `supports-zerogpu-headers` reply and be booked as anonymous. Warming it at application startup gives the embedded
+ * Space time to attach the signed-in user's short-lived ZeroGPU identity before any expensive request exists.
+ */
+export function warmGeneratorConnection(): void {
+  void getClient().catch(() => undefined);
+}
+
+async function ensureZeroGPUIdentity(): Promise<void> {
+  const inHuggingFaceFrame =
+    window.parent !== window &&
+    (window.location.hostname.endsWith(".hf.space") || window.location.hostname.includes(".dev."));
+  if (!inHuggingFaceFrame || window.supports_zerogpu_headers) return;
+
+  const origin = window.location.hostname.includes(".dev.")
+    ? `https://moon-${window.location.hostname.split(".")[1]}.dev.spaces.huggingface.tech`
+    : "https://huggingface.co";
+  await new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", receive);
+      reject(
+        new Error(
+          "Your Hugging Face login did not attach to this run, so generation was stopped before spending anonymous quota. Reload the Space on huggingface.co and try again.",
+        ),
+      );
+    }, 3_000);
+    const receive = (event: MessageEvent) => {
+      if (event.origin !== origin || event.data !== "supports-zerogpu-headers") return;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", receive);
+      window.supports_zerogpu_headers = true;
+      resolve();
+    };
+    window.addEventListener("message", receive);
+    window.parent.postMessage("supports-zerogpu-headers", origin);
+  });
 }
 
 /**
@@ -174,6 +226,7 @@ export async function runGeneration(
   let runtimeStartedAt: number | null = null;
   const { handle_file } = await import("@gradio/client");
   const client = await getClient();
+  await ensureZeroGPUIdentity();
   const submission = client.submit("/generate", {
     prompt: values.prompt,
     image_path: values.referenceMode === "keyframes" && values.image ? handle_file(values.image) : null,

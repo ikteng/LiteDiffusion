@@ -4,6 +4,11 @@ import { Tooltip } from "@base-ui/react/tooltip";
 import { MotionConfig } from "framer-motion";
 import "./styles.css";
 import App from "./App";
+import { warmGeneratorConnection } from "./api";
+
+// Start the Hugging Face parent-frame quota handshake before the first render. Waiting until Generate is clicked can
+// race the queue submission and silently charge the anonymous allowance even while the user is signed in.
+warmGeneratorConnection();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
