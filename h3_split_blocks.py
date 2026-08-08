@@ -33,11 +33,22 @@ from diffusers.modular_pipelines.minimax_h3.modular_blocks_minimax_h3 import (
     _generation_outputs,
 )
 from diffusers.modular_pipelines.modular_pipeline import SequentialPipelineBlocks
-from diffusers.modular_pipelines.modular_pipeline_utils import OutputParam
+from diffusers.modular_pipelines.modular_pipeline_utils import InputParam, OutputParam
 
 
 class _PreviewLoopMixin:
     """The pinned Diffusers loop plus four non-authoritative TAE preview emissions."""
+
+    @property
+    def loop_inputs(self):
+        # The stock loop has no reason to carry geometry into its inner BlockState. TAE has to invert the packed rows,
+        # so explicitly retain the three dimensions produced by `prepare_layout` alongside the ordinary timesteps.
+        return [
+            *super().loop_inputs,
+            InputParam("num_latent_frames", type_hint=int, required=True),
+            InputParam("latent_height", type_hint=int, required=True),
+            InputParam("latent_width", type_hint=int, required=True),
+        ]
 
     def __call__(self, components, state):
         from h3_tae import maybe_emit_preview
