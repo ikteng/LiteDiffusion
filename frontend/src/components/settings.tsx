@@ -37,7 +37,7 @@ type SettingsProps = {
 /** GPU seconds for the current request, optionally overriding the step count to price a preset the user has not picked. */
 export function budgetFor(config: StudioConfig, values: GenerationValues, steps: number): number {
   const canvas = findCanvas(config, values.canvas);
-  return estimateGpuSeconds({
+  const estimate = estimateGpuSeconds({
     width: canvas.width,
     height: canvas.height,
     frames: snapFrames(values.duration),
@@ -45,6 +45,7 @@ export function budgetFor(config: StudioConfig, values: GenerationValues, steps:
     keyframes: Number(values.image != null) + Number(values.lastImage != null),
     upsample: values.upsample,
   });
+  return Math.min(config.max_gpu_duration, estimate);
 }
 
 /**

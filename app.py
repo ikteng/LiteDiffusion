@@ -37,6 +37,9 @@ PLACEMENT = os.environ.get("H3_PLACEMENT", "lazy" if ENGINE == "nvfp4" else "pac
 # cuDNN's fused attention is 10-20% faster than the SDPA default on this pool and needs nothing installed.
 ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
 GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
+# ZeroGPU rejects dynamic reservations above five minutes before the job enters the queue. Keep this configurable for
+# self-hosted deployments, but never let a conservative Ref2VA estimate make the public Space request an invalid slot.
+MAX_GPU_DURATION = int(os.environ.get("H3_MAX_GPU_DURATION", "300"))
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "h3-outputs")
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 TURBO_4_LORA_REPO = "lightx2v/Minimax-h3-Turbo"
@@ -565,7 +568,8 @@ def get_duration(prompt, prompt_embeds, text_token_tags, image, last_image, heig
     denoise = steps * (_DUR_B * rows + _DUR_C * rows**2)
     decode = _DECODE_BASE + _DECODE_PER_DEFAULT_CANVAS * (height * width * num_frames) / _DEFAULT_CANVAS_PIXELS
     local_conditioning = 20 if prompt_embeds is None else 0
-    return max(60, int(denoise + decode) + local_conditioning + _PLACEMENT_ALLOWANCE + _PAD)
+    estimated = max(60, int(denoise + decode) + local_conditioning + _PLACEMENT_ALLOWANCE + _PAD)
+    return min(MAX_GPU_DURATION, estimated)
 
 
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
@@ -1102,6 +1106,7 @@ def studio_config():
         ],
         "default_canvas": DEFAULT_CANVAS,
         "duration": {"min": MIN_UI_DURATION, "max": MAX_UI_DURATION, "default": 5},
+        "max_gpu_duration": MAX_GPU_DURATION,
         # `steps` and `acceleration` are the schedule this preset substitutes. The studio needs them to price each
         # preset with `get_duration`'s formula before the user picks one, so a 4-step run is visibly cheaper.
         "presets": [

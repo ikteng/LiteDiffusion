@@ -25,6 +25,7 @@ export type StudioConfig = {
   canvases: CanvasOption[];
   default_canvas: string;
   duration: { min: number; max: number; default: number };
+  max_gpu_duration: number;
   presets: PresetOption[];
   default_preset: string;
   custom_preset: string;
@@ -157,6 +158,7 @@ export const FALLBACK_CONFIG: StudioConfig = {
   ],
   default_canvas: "960x544 · 16:9 fast",
   duration: { min: 2, max: 14, default: 5 },
+  max_gpu_duration: 300,
   presets: [
     {
       value: "Balanced — best overall (recommended)",
