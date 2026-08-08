@@ -8,6 +8,7 @@ import { FADE } from "../lib/motion";
 import {
   estimateGpuSeconds,
   findCanvas,
+  findPreset,
   formatBudget,
   formatClock,
   groupCanvases,
@@ -44,6 +45,26 @@ export function budgetFor(config: StudioConfig, values: GenerationValues, steps:
     keyframes: Number(values.image != null) + Number(values.lastImage != null),
     upsample: values.upsample,
   });
+}
+
+/**
+ * The fastest preset and what switching to it would save, or `null` when there is nothing to offer.
+ *
+ * `ComposeRail` uses this to put a one-press shortcut on the Speed header. It returns `null` when the user is already
+ * on the fastest preset, when manual controls are in effect (the presets are not what is deciding the cost then), and
+ * when the saving is under half a minute — a shortcut that saves twenty seconds is not worth the row it sits on.
+ */
+export function fasterOption(
+  config: StudioConfig,
+  values: GenerationValues,
+): { preset: string; saves: number } | null {
+  const axis = presetAxis(config.presets);
+  const fastest = axis[0];
+  if (!fastest) return null;
+  const current = findPreset(config, values.preset);
+  if (current.custom || current.value === fastest.value) return null;
+  const saves = budgetFor(config, values, current.steps) - budgetFor(config, values, fastest.steps);
+  return saves >= 30 ? { preset: fastest.value, saves } : null;
 }
 
 function sentence(text: string): string {

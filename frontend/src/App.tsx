@@ -6,6 +6,7 @@ import { Header } from "./components/Header";
 import { History } from "./components/History";
 import { UsageSheet } from "./components/UsageSheet";
 import { Viewer } from "./components/Viewer";
+import { loadSpeed, saveSpeed } from "./lib/storage";
 import { findCanvas, snapFrames, FPS } from "./lib/studio";
 import type { GenerationValues, HistoryItem, ModelStatus, RunProgress, StudioConfig } from "./types";
 import { FALLBACK_CONFIG } from "./types";
@@ -29,6 +30,9 @@ function initialValues(config: StudioConfig): GenerationValues {
     loraRepo: "",
     loraFilename: "",
     loraStrength: 1,
+    // Whatever speed this browser last used wins over the defaults. `loadSpeed` has already validated the shape; the
+    // effect below is what checks the remembered preset against the presets the server actually offers today.
+    ...loadSpeed(),
   };
 }
 
@@ -77,6 +81,20 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, []);
+
+  // Persisted on change rather than on generate, so a preset you picked and then walked away from is still there when
+  // you come back — the point is that you never have to set it twice.
+  useEffect(() => {
+    saveSpeed(values);
+  }, [
+    values.preset,
+    values.steps,
+    values.acceleration,
+    values.loraPreset,
+    values.loraRepo,
+    values.loraFilename,
+    values.loraStrength,
+  ]);
 
   const update = useCallback(
     <K extends keyof GenerationValues>(key: K, value: GenerationValues[K]) =>

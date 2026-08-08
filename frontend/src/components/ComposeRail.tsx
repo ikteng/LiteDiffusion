@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Loader2, Sparkles, Zap } from "lucide-react";
+import { Gauge, Loader2, Sparkles, Zap } from "lucide-react";
 import { Toggle } from "@base-ui/react/toggle";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "../lib/cx";
@@ -8,7 +8,15 @@ import { findPreset, formatBudget } from "../lib/studio";
 import type { GenerationValues, StudioConfig } from "../types";
 import { Button } from "../ui/Button";
 import { Section } from "../ui/Section";
-import { budgetFor, FormatSettings, KeyframeSettings, LengthSettings, SeedSettings, SpeedSettings } from "./settings";
+import {
+  budgetFor,
+  fasterOption,
+  FormatSettings,
+  KeyframeSettings,
+  LengthSettings,
+  SeedSettings,
+  SpeedSettings,
+} from "./settings";
 
 type Props = {
   config: StudioConfig;
@@ -24,15 +32,21 @@ type Props = {
 /**
  * Everything that goes into a shot, in one scrollable column.
  *
- * Nothing here is behind a popover. The rail is a form: prompt at the top, then the settings in the order you would
- * actually revisit them, each showing its current value without being opened. On a wide window the rail scrolls
- * independently of the viewer so the clip you are looking at stays put while you change what comes next.
+ * Nothing here is behind a popover. The rail is a form: the settings in the order you would actually revisit them,
+ * each showing its current value without being opened. On a wide window the rail scrolls independently of the viewer
+ * so the clip you are looking at stays put while you change what comes next.
+ *
+ * Speed comes first and is the one accented section, because it is the only setting that decides how long you wait —
+ * a four-minute booking and a one-minute booking are the same three keystrokes apart, and someone who never scrolls
+ * past the prompt would never find that out. It is also the only setting that persists between visits, which is what
+ * makes putting it at the top cheap rather than nagging: set it once and the rail opens on your answer.
  */
 export function ComposeRail({ config, values, update, onApplyExample, onGenerate, running, blockedReason }: Props) {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const preset = findPreset(config, values.preset);
   const steps = preset.custom ? values.steps : preset.steps;
   const budget = budgetFor(config, values, steps);
+  const faster = fasterOption(config, values);
   const ready = values.prompt.trim().length > 0 && !running && !blockedReason;
 
   // Grow the prompt with its content instead of scrolling inside a fixed box, up to a point where the rail takes over.
@@ -46,6 +60,37 @@ export function ComposeRail({ config, values, update, onApplyExample, onGenerate
   return (
     <div className="flex min-h-0 flex-col lg:h-full">
       <div className="scrollbar-slim divide-y divide-line lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain">
+        <Section
+          title="Speed"
+          tone="accent"
+          action={
+            // Only offered when it is worth taking, so it never becomes a button people learn to ignore. It names the
+            // saving rather than the preset, because the saving is the thing being decided.
+            <AnimatePresence initial={false} mode="popLayout">
+              {faster && (
+                <motion.div
+                  key={faster.saves}
+                  initial={{ opacity: 0, scale: 0.94 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.94 }}
+                  transition={POP}
+                >
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => update("preset", faster.preset)}
+                    className="text-accent hover:bg-accent/12 hover:text-accent"
+                  >
+                    <Gauge /> Save {formatBudget(faster.saves)}
+                  </Button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          }
+        >
+          <SpeedSettings config={config} values={values} update={update} />
+        </Section>
+
         <Section
           title="Prompt"
           action={
@@ -117,10 +162,6 @@ export function ComposeRail({ config, values, update, onApplyExample, onGenerate
 
         <Section title="Length">
           <LengthSettings config={config} values={values} update={update} />
-        </Section>
-
-        <Section title="Speed">
-          <SpeedSettings config={config} values={values} update={update} />
         </Section>
 
         <Section title="Seed">
