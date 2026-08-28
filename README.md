@@ -1,200 +1,46 @@
 ---
-title: MiniMax-H3 Ultra Fast
-emoji: ⚡
-colorFrom: purple
-colorTo: indigo
+title: LiteDiffusion
+emoji: 🖼️
+colorFrom: blue
+colorTo: yellow
 sdk: gradio
-sdk_version: 6.20.0
+sdk_version: 6.26.0
+python_version: '3.12'
 app_file: app.py
-pinned: true
-short_description: Ultra-fast local NVFP4 video + synchronized audio generation
-suggested_hardware: zero-a10g
+pinned: false
+short_description: Small distilled text-to-image models, fast on ordinary CPUs
 ---
 
-# MiniMax-H3 Ultra Fast — local conditioner + pruned NVFP4 on Blackwell
+# LiteDiffusion
 
-Joint video and synchronized sound from MiniMax-H3, rebuilt for a single 96 GB Blackwell ZeroGPU worker.
+A lightweight Gradio app for generating images from text on plain CPUs — no GPU, no CUDA, no quantization
+toolchain required. It trades MiniMax-H3's video+audio generation for small, distilled text-to-image models that
+are actually fast without an accelerator.
 
-## Active optimization stack
+## Models
 
-| layer | optimization |
-|---|---|
-| Weights | 12.5 GB pruned NVFP4 transformer: 20.1B effective parameters instead of 33.1B/61.7 GiB BF16. |
-| Compute | Native CUDA 13 NVFP4 tensor-core GEMMs through `comfy-kitchen`; higher-precision norms, embeddings and output heads. |
-| Residency | Transformer, conditioner and both VAEs remain GPU-resident during generation—no layerwise CPU offload. |
-| Conditioner | Local 15.7 GB Qwen3-VL NVFP4-AWQ checkpoint containing only the 50 language layers H3 uses; no normal cross-Space encode round trip. |
-| AdaLN | 13.04B projection parameters replaced by a 1,025-point timestep curve; one table conversion per block, segment-wise in-place modulation/gating. |
-| Attention projections | One fused QKV matrix and one fused in-place Q/K RMSNorm + partial split-half RoPE kernel per block. |
-| Attention | cuDNN dense attention for short/medium sequences; NVIDIA Sol-Attn Triton routing only above 24,576 packed tokens. |
-| Sol-Attn quality guard | First 10 steps and first 2 blocks stay dense; text, conditioning video and generated audio remain exact KV/query rows. |
-| Step reuse | 28-step Balanced uses NVIDIA H3 FirstBlockCache at `0.08`, with 3 dense warmup and 2 dense tail steps. |
-| Aggressive mode | Ultra Fast keeps its scheduler trajectory but forecasts the joint video/audio residual between bounded exact anchors. |
-| Exact mode | Disables block reuse and sparse attention while retaining the lossless kernel/layout optimizations. |
-| MLP | Fused gate/up checkpoint layout, in-place SiLU×up, native NVFP4 down projection. |
-| Output | Final RMSNorm and video/audio heads run only on retained generated rows; discarded conditioning rows bypass FP32 projection. |
-| Request-static work | Text refinement, RoPE, segment metadata and keyframe patch projections are cached once per request. |
-| Memory traffic | Packed buffers skip redundant zero-fill; cached segment rows avoid repeated CUDA-scalar indexing; hot dispatch lookups are hoisted. |
-| Decode/output | Video and audio VAEs remain full precision; muxing stays outside the denoiser. |
-| Reliability | Automatic retry replaces unhealthy ZeroGPU workers on transient ECC/CUDA initialization failures. |
+| model | params | steps | notes |
+|---|---:|---:|---|
+| [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | ~1B | 1 | Distilled SD2.1; best quality of the three, still single-step. Default. |
+| [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | ~0.6B | 1 | Smallest and fastest; built specifically for real-time generation. |
+| [`segmind/tiny-sd`](https://huggingface.co/segmind/tiny-sd) | ~0.5B UNet | 20 | Smaller architecture, but needs more steps, so it isn't the fastest wall-clock option. |
 
-This is inference-work caching, not prompt-to-video result caching: every prompt and seed starts with fresh latents
-and request-local state. On a warm 960×544, 56-frame, 28-step comparison, Balanced reduced 27 full DiT evaluations
-to 20 plus 7 cached block-stack reuses, taking denoise + decode from 35 seconds to 23 seconds (~1.52×).
+All three run through `diffusers.AutoPipelineForText2Image` in FP32 on CPU. Each pipeline is loaded lazily on
+first use and then kept in memory for the rest of the session.
 
-The source model is [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3). The pruned NVFP4
-checkpoint is
-[`lilcheaty/MiniMax-H3-NVFP4`](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4), derived from ComfyUI's
-[`MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) repackage.
+## Running locally
 
-## Why the pruned transformer matters
+```bash
+pip install -r requirements.txt
+python app.py
+```
 
-MiniMax-H3's published model card notes that about 13B parameters live in AdaLN-related branches and that their
-outputs can be precomputed for inference. The pruned checkpoint makes that concrete: it samples the shared timestep
-embedding curve at 1025 points and linearly interpolates an 8-value coordinate for each requested timestep. Every
-block's modulation projection consequently becomes `[96768, 8]` instead of `[96768, 2688]`.
+The first generation with a given model downloads its weights from the Hugging Face Hub (a few hundred MB to
+~2 GB depending on the model) and caches them locally.
 
-| parameter group | original BF16 architecture | pruned architecture |
-|---|---:|---:|
-| AdaLN projections | 13.04B | 0.04B |
-| MLP | 12.02B | 11.56B |
-| attention | 8.02B | 7.71B |
-| refiner, norms and embeddings | 0.05B | 0.80B |
-| **total** | **33.12B** | **20.11B** |
+## Why not MiniMax-H3
 
-The four large matrices in each of the 50 blocks—fused QKV, attention output, MLP up/gate and MLP down—are NVFP4.
-The modulation curve, norms, embeddings, biases and final heads stay at higher precision.
-
-## Why this is faster than the old 4-bit Space
-
-Quantization alone does not guarantee speed. The older 4-bit comparison paid for CPU offload traffic on every layer
-because its runtime did not keep the transformer resident. This engine is about 12 GB, so the transformer, both VAEs,
-working activations and decoder workspace fit together on the 95 GiB `xlarge` ZeroGPU worker. There is no layerwise
-host-device weight traffic in the denoising loop.
-
-ComfyUI reports about a 2× NVFP4 uplift over FP8/BF16 on Blackwell in supported workloads. The H3 checkpoint author
-measured 1.90 s/iteration for pruned NVFP4 versus 2.17 s/iteration for pruned INT8 ConvRot on an RTX PRO 6000
-Blackwell at 864×480, 39 frames. Those numbers are useful implementation evidence, not a promise for every canvas:
-H3 attention grows quadratically with packed sequence length, so resolution, duration and keyframe vision tokens
-still dominate large requests.
-
-## One-Space deployment
-
-The original BF16 deployment had to be split because its 62.14 GiB conditioner plus 61.7 GiB transformer could not
-fit comfortably under one Space's storage and runtime limits. The pruned formats change that calculation:
-
-| component | where it runs | precision / format |
-|---|---|---|
-| Qwen3-VL layer-50 conditioner | this Space | truncated NVFP4-AWQ weights / BF16 GEMMs + BF16 vision tower |
-| H3 transformer | this Space | pruned NVFP4 + higher-precision islands |
-| video VAE | this Space | full precision checkpoint policy |
-| audio VAE | this Space | FP32 |
-
-The embeddings stay on the same GPU worker and flow directly into H3: there is no Gradio round trip, second queue,
-safetensors serialization, or user-quota handoff during normal generation. Prompt upsampling still uses the remote
-BF16 conditioner because rewriting requires the language-model head and the 14 decoder layers deliberately removed
-from the local inference-only checkpoint. The remote service also remains an automatic fallback if local loading
-fails.
-
-## Kernel path
-
-`h3_nvfp4.py` adapts the public ComfyUI H3 implementation to diffusers' packed transformer signature. It deliberately
-does not install or launch the ComfyUI application. The small adapter uses only `comfy-kitchen` for:
-
-1. Dynamic NVFP4 activation quantization and native FP4 matrix multiplication.
-2. Fused in-place Q/K RMSNorm and three-axis split-half rotary embedding.
-
-Attention uses NVIDIA Sol-Attn's portable Triton kernel on eligible target-video calls and keeps diffusers'
-`_native_cudnn` backend for the first ten denoising steps, the first two blocks, Exact mode, short sequences and any
-safe fallback. The MLP uses one fused QKV-style gate/up matrix, in-place SiLU×up, and the NVFP4 down projection.
-
-Above that kernel path, Ultra Fast preserves the scheduler's 16-step trajectory but evaluates the full DiT only at
-7 anchor steps. Between anchors it extrapolates the joint video/audio residual from the last two exact evaluations.
-It keeps the first three and last two evaluations exact and never forecasts more than three consecutive steps.
-Balanced uses the official H3 FirstBlockCache signal at `0.08`, with three dense warmup and two dense tail steps;
-Exact disables all block reuse and sparse attention.
-The result panel and Space log report actual DiT evaluations and forecasts for every request. Different prompts and
-seeds never share this state.
-
-The old BF16/AoTI engine remains available with `H3_ENGINE=bf16`. It is useful as a quality/debug reference, but it is
-not the default.
-
-## Quality trade-off
-
-The transformer, local conditioner, and accelerated step modes are approximate. The checkpoint author reports that
-4-bit weights can show more
-mid-motion artifacts and weaker shape retention than the larger INT8 ConvRot checkpoint on difficult 15-second
-clips. The comparison was not fully controlled, so treat it as a real caution rather than a quantified quality
-score. Use Balanced for difficult fast motion, eyes, fingers, or shape retention, and Exact when every requested
-transformer evaluation matters. Increasing the step slider does not change Ultra Fast's maximum three-step forecast
-span; it adds more exact anchor evaluations as well as scheduler steps.
-
-The Space keeps both VAEs full precision and leaves AdaLN, norms, embeddings and output heads out of NVFP4. For the
-exact original denoiser, set `H3_ENGINE=bf16`; this restores the 61.7 GiB unquantized transformer and its AoTI option.
-
-## Space variables
-
-| variable | default | meaning |
-|---|---|---|
-| `H3_ENGINE` | `nvfp4` | `nvfp4` ultra engine or `bf16` reference engine. |
-| `H3_NVFP4_REPO` | `lilcheaty/MiniMax-H3-NVFP4` | Repository containing the pruned Comfy-format transformer. |
-| `H3_NVFP4_FILE` | `minimax_h3_fl2va_pruned_nvfp4.safetensors` | FL2VA/T2VA transformer file. |
-| `H3_MODEL_REPO` | `MiniMaxAI/MiniMax-H3` | Canonical schedulers and VAE checkpoint. |
-| `H3_CONDITIONER_MODE` | `local` | Use the local truncated conditioner; `remote` restores the split deployment. |
-| `H3_LOCAL_CONDITIONER_REPO` | `Comfy-Org/MiniMax-H3` | Repository containing the truncated conditioner. |
-| `H3_LOCAL_CONDITIONER_FILE` | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | Local layer-50 conditioner checkpoint. |
-| `H3_CONDITIONER_NATIVE_NVFP4` | `0` | Use native W4A4 conditioner GEMMs for maximum speed; default BF16 GEMMs add less activation error. |
-| `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | Prompt-upsampling and local-load fallback service. |
-| `H3_PLACEMENT` | `lazy` (`nvfp4`) | Move the compact transformer and VAEs on the first GPU call, then keep them resident. |
-| `H3_ATTENTION` | `_native_cudnn` | Attention backend for both the main stack and text refiner. |
-| `H3_FIRST_BLOCK_THRESHOLD` | `0.08` | Balanced-mode normalized first-block residual threshold, matching NVIDIA's H3 preset. |
-| `H3_FIRST_BLOCK_DENSE_START` | `3` | Dense warmup steps retained before FirstBlockCache may reuse blocks 2–50. |
-| `H3_FIRST_BLOCK_DENSE_END` | `2` | Dense tail steps retained after FirstBlockCache reuse is disabled. |
-| `H3_FORECAST_BLEND` | `0.65` | Ultra Fast linear-trend strength; lower values stay closer to last-residual reuse. |
-| `H3_FUSED_ADALN` | `0` | Opt in to fused AdaLN kernels; compilation is expensive on fresh ZeroGPU workers. |
-| `H3_SOL_ATTN` | `1` | Use NVIDIA Sol-Attn outside Exact mode, with automatic dense fallback. |
-| `H3_SOL_ATTN_BACKEND` | `triton` | Released portable backend; `auto` tries CuTe when its rapidly moving DSL/FFI ABI matches. |
-| `H3_SOL_ATTN_TAU` | `1.0` | Official H3 sparse-routing threshold. |
-| `H3_SOL_ATTN_DENSE_STEPS` | `10` | Initial denoising steps kept on exact dense attention. |
-| `H3_SOL_ATTN_DENSE_LAYERS` | `2` | Initial transformer blocks kept on exact dense attention. |
-| `H3_SOL_ATTN_MIN_TOKENS` | `24576` | Keep faster dense cuDNN attention on medium sequences; sparsify only long packed sequences. |
-| `H3_GPU_SIZE` | `xlarge` | 95 GiB Blackwell ZeroGPU allocation. |
-| `H3_AOTI` | `0` | BF16 engine only: load the optional repeated-block AoTI package. |
-
-## Runtime requirements
-
-- PyTorch 2.11 with CUDA 13.0.
-- A Blackwell GPU (`sm120` for this Space). NVFP4 on older architectures is emulated and can be slower than BF16.
-- `comfy-kitchen==0.2.26` for the native layouts and fused Q/K kernel.
-- The pinned MiniMax-H3 diffusers pull request for the modular schedulers, packing and VAE decode path.
-
-No secret is required. All model artifacts are public. Normal requests use one local GPU booking; a prompt-upsampling
-request forwards the requesting user's ZeroGPU identity to the remote rewriter/conditioner.
-
-## How the optimizations fit together
-
-The largest structural win happens before sampling: NVFP4 makes the pruned transformer small enough to stay beside
-the local conditioner and full-precision VAEs on one worker. That removes both per-layer host transfers and the old
-remote conditioning handoff. Fused layouts then reduce launches and wide activation traffic inside every block.
-
-Balanced attacks repeated denoising work without reducing the requested 28 scheduler steps. It always evaluates the
-first transformer block, compares that block's residual with the previous exact step, and only reuses the cached
-residual of blocks 2–50 when the official H3 signal is below threshold. Exact keeps this probe disabled. Sol-Attn is
-orthogonal: it sparsifies expensive long-sequence target-video attention, but is gated off wherever cuDNN is faster.
-
-Several plausible changes were benchmarked and deliberately not shipped: concurrent VAE decoding, combined AdaLN
-banks, PyTorch 2.13, and always-on Triton AdaLN kernels were slower, unsupported by ZeroGPU, or too expensive at cold
-start. The deployed path favors measured end-to-end latency rather than accumulating optimization flags.
-
-## Attribution
-
-This is an optimized derivative of the original
-[`multimodalart/minimax-h3`](https://huggingface.co/spaces/multimodalart/minimax-h3) Space.
-
-The fused/pruned model structure follows
-[`comfy/ldm/minimax/model.py`](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/ldm/minimax/model.py) from
-ComfyUI (Apache-2.0). FirstBlockCache and Sol-Attn are adapted from NVIDIA's Apache-2.0
-[`MiniMax-H3 Sol-Engine`](https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3) release. The quantized checkpoint and its conversion notes are from
-[`lilcheaty/MiniMax-H3-NVFP4`](https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4). MiniMax-H3 weights remain governed
-by the MiniMax-H3 Community License Agreement.
-
-H/t to **blanchon** for pointing me to NVIDIA Sana/Sol-Engine.
+MiniMax-H3 is a 20B+ parameter video-and-audio diffusion transformer built around Blackwell-only NVFP4 tensor-core
+kernels; there is no way to make that fast on a CPU; the parameter count and attention cost make a CPU pass take
+minutes to hours per clip regardless of kernel choice. This Space instead targets a different, achievable goal:
+real text-to-image generation in a few seconds on hardware everyone already has.
