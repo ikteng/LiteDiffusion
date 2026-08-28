@@ -7,7 +7,7 @@ import time
 
 import gradio as gr
 import torch
-from diffusers import AutoPipelineForText2Image
+from diffusers import DiffusionPipeline
 
 torch.set_num_threads(os.cpu_count() or 4)
 
@@ -33,13 +33,13 @@ MODELS = {
 }
 DEFAULT_MODEL = next(iter(MODELS))
 
-_pipelines: dict[str, AutoPipelineForText2Image] = {}
+_pipelines: dict[str, DiffusionPipeline] = {}
 
 
-def load_pipeline(model_name: str) -> AutoPipelineForText2Image:
+def load_pipeline(model_name: str) -> DiffusionPipeline:
     if model_name not in _pipelines:
         repo = MODELS[model_name]["repo"]
-        pipe = AutoPipelineForText2Image.from_pretrained(repo, torch_dtype=torch.float32)
+        pipe = DiffusionPipeline.from_pretrained(repo, torch_dtype=torch.float32)
         pipe.to("cpu")
         _pipelines[model_name] = pipe
     return _pipelines[model_name]
