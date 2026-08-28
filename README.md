@@ -1,21 +1,8 @@
----
-title: LiteDiffusion
-emoji: 🖼️
-colorFrom: blue
-colorTo: yellow
-sdk: gradio
-sdk_version: 6.26.0
-python_version: '3.12'
-app_file: app.py
-pinned: false
-short_description: Small distilled text-to-image models, fast on ordinary CPUs
----
-
 # LiteDiffusion
 
-A lightweight Gradio app for generating images from text on plain CPUs — no GPU, no CUDA, no quantization
-toolchain required. It trades MiniMax-H3's video+audio generation for small, distilled text-to-image models that
-are actually fast without an accelerator.
+A local text-to-image app: a FastAPI backend around small, distilled diffusion models, with a React/TypeScript
+frontend (Generate, Gallery, Settings, About tabs). Runs entirely on your own machine — no cloud billing, no
+time-limited hosted quota.
 
 ## Models
 
@@ -25,22 +12,61 @@ are actually fast without an accelerator.
 | [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | ~0.6B | 1 | Smallest and fastest; built specifically for real-time generation. |
 | [`segmind/tiny-sd`](https://huggingface.co/segmind/tiny-sd) | ~0.5B UNet | 20 | Smaller architecture, but needs more steps, so it isn't the fastest wall-clock option. |
 
-All three run through `diffusers.AutoPipelineForText2Image` in FP32 on CPU. Each pipeline is loaded lazily on
-first use and then kept in memory for the rest of the session.
+All three run through `diffusers.DiffusionPipeline`. The backend auto-detects a CUDA GPU
+(`torch.cuda.is_available()`) and uses it in FP16 if present, otherwise falls back to FP32 on CPU. Each pipeline
+is loaded lazily on first use and kept in memory for the rest of the session.
 
 ## Running locally
 
 ```bash
 pip install -r requirements.txt
-python app.py
+
+cd frontend
+npm install
+npm run build
+cd ..
+
+python run.py
 ```
 
+`python run.py` starts the FastAPI server on `http://127.0.0.1:8000` and opens it in your browser. The frontend
+build step is one-time (or whenever the UI changes) — day-to-day, `python run.py` is the only command you need.
+
 The first generation with a given model downloads its weights from the Hugging Face Hub (a few hundred MB to
-~2 GB depending on the model) and caches them locally.
+~2 GB depending on the model) and caches them locally. If you have an NVIDIA GPU, installing a CUDA-enabled
+build of `torch` (see [pytorch.org](https://pytorch.org/get-started/locally/)) will speed generation up
+significantly; otherwise it runs fine on CPU.
+
+Generated images and their metadata are saved to `outputs/` and persist across restarts (visible in the Gallery
+tab).
+
+## Frontend development
+
+For UI iteration with hot reload, run the API and the Vite dev server side by side:
+
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+```bash
+cd frontend
+npm run dev
+```
+
+The dev server proxies `/api` and `/outputs` requests to the FastAPI server.
+
+## Architecture
+
+- `backend/` — FastAPI app: `config.py` (models/device), `pipelines.py` (generation), `jobs.py` (async job
+  queue, one generation at a time), `store.py` (disk-persisted history), `routes/` (REST endpoints under `/api`).
+- `frontend/` — Vite + React + TypeScript SPA, built to `frontend/dist/` and served by the backend.
+- `run.py` — single entrypoint for normal use.
+
+The job/history data model includes a `media_type` field (currently only `image` is implemented; `video` is
+reserved and rejected) so a future text-to-video mode can be added without reshaping the API.
 
 ## Why not MiniMax-H3
 
 MiniMax-H3 is a 20B+ parameter video-and-audio diffusion transformer built around Blackwell-only NVFP4 tensor-core
-kernels; there is no way to make that fast on a CPU; the parameter count and attention cost make a CPU pass take
-minutes to hours per clip regardless of kernel choice. This Space instead targets a different, achievable goal:
-real text-to-image generation in a few seconds on hardware everyone already has.
+kernels; there's no practical way to run that on a typical local machine. This project instead targets a
+different, achievable goal: real text-to-image generation in a few seconds on hardware people already have.
