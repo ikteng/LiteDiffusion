@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Trash2, Images, Loader2, ChevronDown } from "lucide-react";
+import { Trash2, Images, Loader2, ChevronDown, Video } from "lucide-react";
 import { api } from "../api";
 import type { HistoryItem } from "../types";
 
@@ -54,7 +54,7 @@ export default function GalleryTab({ refreshKey }: { refreshKey?: number } = {})
           {!loading && items.length === 0 && (
             <div className="flex flex-col items-center gap-2 text-zinc-600 p-10">
               <Images size={28} />
-              <p className="text-sm">No generations yet — generate an image above to get started.</p>
+              <p className="text-sm">No generations yet — generate an image or video above to get started.</p>
             </div>
           )}
 
@@ -65,7 +65,20 @@ export default function GalleryTab({ refreshKey }: { refreshKey?: number } = {})
                   key={item.id}
                   className="group relative bg-zinc-800/60 border border-zinc-800 rounded-xl overflow-hidden hover:border-zinc-700 transition-colors"
                 >
-                  <img src={item.file_url} alt={item.prompt} className="w-full aspect-square object-cover" />
+                  {item.media_type === "video" ? (
+                    <video
+                      src={item.file_url}
+                      muted
+                      loop
+                      playsInline
+                      className="w-full aspect-square object-cover bg-black"
+                    />
+                  ) : (
+                    <img src={item.file_url} alt={item.prompt} className="w-full aspect-square object-cover" />
+                  )}
+                  <span className="absolute top-2 left-2 bg-black/60 rounded-full p-1.5 text-violet-300">
+                    {item.media_type === "video" ? <Video size={14} /> : <Images size={14} />}
+                  </span>
                   <button
                     onClick={() => handleDelete(item.id)}
                     title="Delete"

@@ -33,6 +33,8 @@ class JobResult(BaseModel):
     height: int
     seed: int
     elapsed_seconds: float
+    frames: int | None = None
+    fps: float | None = None
 
 
 class JobResponse(BaseModel):
@@ -58,6 +60,8 @@ class HistoryItem(BaseModel):
     created_at: float
     file: str
     file_url: str
+    frames: int | None = None
+    fps: float | None = None
 
 
 class HistoryListResponse(BaseModel):

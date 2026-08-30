@@ -15,6 +15,8 @@ export interface JobResult {
   height: number;
   seed: number;
   elapsed_seconds: number;
+  frames?: number | null;
+  fps?: number | null;
 }
 
 export interface JobResponse {
@@ -40,6 +42,8 @@ export interface HistoryItem {
   created_at: number;
   file: string;
   file_url: string;
+  frames?: number | null;
+  fps?: number | null;
 }
 
 export interface HistoryListResponse {

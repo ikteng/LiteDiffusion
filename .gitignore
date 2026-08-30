@@ -3,6 +3,7 @@ __pycache__/
 .claude
 .venv
 outputs/
+hf-cache/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo

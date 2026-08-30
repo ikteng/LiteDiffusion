@@ -37,38 +37,53 @@ def _run_job(job_id: str, request: GenerateRequest) -> None:
     job.status = JobStatus.RUNNING
 
     try:
-        image, metadata = pipelines.generate_image(request.prompt, request.model, request.seed)
+        if request.media_type == MediaType.VIDEO:
+            file_path, metadata = pipelines.generate_video(request.prompt, request.model, request.seed)
+            filename = file_path.name
+            relative_file = f"videos/{filename}"
+            result = JobResult(
+                media_type=MediaType.VIDEO,
+                file_url=f"/outputs/{relative_file}",
+                width=metadata["width"],
+                height=metadata["height"],
+                seed=metadata["seed"],
+                elapsed_seconds=metadata["elapsed_seconds"],
+                frames=metadata["frames"],
+                fps=metadata["fps"],
+            )
+        else:
+            image, metadata = pipelines.generate_image(request.prompt, request.model, request.seed)
+            filename = f"{job_id}.png"
+            config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+            image.save(config.IMAGES_DIR / filename)
+            relative_file = f"images/{filename}"
+            result = JobResult(
+                media_type=MediaType.IMAGE,
+                file_url=f"/outputs/{relative_file}",
+                width=metadata["width"],
+                height=metadata["height"],
+                seed=metadata["seed"],
+                elapsed_seconds=metadata["elapsed_seconds"],
+            )
     except Exception as exc:  # noqa: BLE001 - surfaced to the client as job.error
         job.status = JobStatus.FAILED
         job.error = str(exc)
         return
 
-    filename = f"{job_id}.png"
-    config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    image.save(config.IMAGES_DIR / filename)
-    relative_file = f"images/{filename}"
-
-    result = JobResult(
-        media_type=MediaType.IMAGE,
-        file_url=f"/outputs/{relative_file}",
-        width=metadata["width"],
-        height=metadata["height"],
-        seed=metadata["seed"],
-        elapsed_seconds=metadata["elapsed_seconds"],
-    )
-
     history_item = HistoryItem(
         id=job_id,
-        media_type=MediaType.IMAGE,
+        media_type=result.media_type,
         prompt=request.prompt,
         model=request.model,
-        seed=metadata["seed"],
-        width=metadata["width"],
-        height=metadata["height"],
-        elapsed_seconds=metadata["elapsed_seconds"],
+        seed=result.seed,
+        width=result.width,
+        height=result.height,
+        elapsed_seconds=result.elapsed_seconds,
         created_at=job.created_at,
         file=relative_file,
         file_url=result.file_url,
+        frames=result.frames,
+        fps=result.fps,
     )
     store.append_history(history_item)
 

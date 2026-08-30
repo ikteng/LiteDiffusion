@@ -8,8 +8,8 @@ time-limited hosted quota.
 
 | model | params | steps | notes |
 |---|---:|---:|---|
-| [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | ~1B | 1 | Distilled SD2.1; best quality of the three, still single-step. Default. |
-| [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | ~0.6B | 1 | Smallest and fastest; built specifically for real-time generation. |
+| [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | ~0.6B | 1 | Smallest and fastest; built specifically for real-time generation. **Default.** |
+| [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | ~1B | 1 | Distilled SD2.1; best quality of the three, still single-step. |
 | [`segmind/tiny-sd`](https://huggingface.co/segmind/tiny-sd) | ~0.5B UNet | 20 | Smaller architecture, but needs more steps, so it isn't the fastest wall-clock option. |
 
 All three run through `diffusers.DiffusionPipeline`. The backend auto-detects a CUDA GPU
@@ -62,8 +62,11 @@ The dev server proxies `/api` and `/outputs` requests to the FastAPI server.
 - `frontend/` — Vite + React + TypeScript SPA, built to `frontend/dist/` and served by the backend.
 - `run.py` — single entrypoint for normal use.
 
-The job/history data model includes a `media_type` field (currently only `image` is implemented; `video` is
-reserved and rejected) so a future text-to-video mode can be added without reshaping the API.
+The job/history data model carries a `media_type` field (`image` or `video`). Image generation uses the
+distilled models above; video generation (`backend/pipelines.py:generate_video`) renders a few keyframes with
+the chosen image model, then interpolates between them into a short MP4 — fast and CPU-friendly, with no extra
+model download. A heavier real text-to-video model (e.g. AnimateLCM) can later replace that function behind the
+same `media_type: video` path.
 
 ## Why not MiniMax-H3
 

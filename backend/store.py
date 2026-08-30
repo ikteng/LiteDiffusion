@@ -54,6 +54,10 @@ def delete_history(item_id: str) -> bool:
             return False
         _write_index(remaining)
 
-    image_path = config.IMAGES_DIR / removed[0]["file"].split("/")[-1]
-    image_path.unlink(missing_ok=True)
+    rel_file = removed[0]["file"]
+    if rel_file.startswith("videos/"):
+        media_path = config.VIDEOS_DIR / rel_file.split("/")[-1]
+    else:
+        media_path = config.IMAGES_DIR / rel_file.split("/")[-1]
+    media_path.unlink(missing_ok=True)
     return True

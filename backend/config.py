@@ -36,10 +36,20 @@ MODELS = {
         "size": 512,
     },
 }
-DEFAULT_MODEL = next(iter(MODELS))
+DEFAULT_MODEL = "sdxs-512"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = REPO_ROOT / "outputs"
 IMAGES_DIR = OUTPUTS_DIR / "images"
+VIDEOS_DIR = OUTPUTS_DIR / "videos"
 INDEX_PATH = OUTPUTS_DIR / "index.json"
 FRONTEND_DIST_DIR = REPO_ROOT / "frontend" / "dist"
+
+# Text-to-video via keyframe generation + frame interpolation. Reuses the image
+# models (already loaded) so no extra weights are needed; motion is a smooth
+# morph between a few generated keyframes. A real T2V model can replace this
+# later behind the same media_type=video path.
+VIDEO = {
+    "keyframes": 5,
+    "fps": 16,
+}
