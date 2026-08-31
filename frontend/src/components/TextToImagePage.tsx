@@ -95,6 +95,7 @@ export default function TextToImagePage() {
               <p className="text-xs text-zinc-500">
                 {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
                 {selectedModel.size}px
+                {selectedModel.remote && " · remote"}
               </p>
             )}
           </div>

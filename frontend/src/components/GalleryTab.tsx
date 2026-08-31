@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Trash2, Images, Loader2, ChevronDown, Video } from "lucide-react";
+import { Trash2, Images, Loader2, ChevronDown, Video, Download } from "lucide-react";
 import { api } from "../api";
 import type { HistoryItem } from "../types";
 
@@ -79,10 +79,19 @@ export default function GalleryTab({ refreshKey }: { refreshKey?: number } = {})
                   <span className="absolute top-2 left-2 bg-black/60 rounded-full p-1.5 text-violet-300">
                     {item.media_type === "video" ? <Video size={14} /> : <Images size={14} />}
                   </span>
+                  <a
+                    href={item.file_url}
+                    download
+                    title="Download"
+                    className="absolute top-2 right-2 bg-black/60 hover:bg-violet-600 rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer no-underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Download size={14} />
+                  </a>
                   <button
                     onClick={() => handleDelete(item.id)}
                     title="Delete"
-                    className="absolute top-2 right-2 bg-black/60 hover:bg-red-600 rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    className="absolute top-9 right-2 bg-black/60 hover:bg-red-600 rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
                   >
                     <Trash2 size={14} />
                   </button>

@@ -18,6 +18,11 @@ def list_models() -> ModelListResponse:
             steps=value["steps"],
             guidance_scale=value["guidance_scale"],
             size=value["size"],
+            kind=value.get("kind", "image"),
+            quantized=value.get("quantized", False),
+            pipeline=value.get("pipeline", "DiffusionPipeline"),
+            frame_arg=value.get("frame_arg", "num_frames"),
+            remote=value.get("remote", False),
         )
         for key, value in config.MODELS.items()
     ]

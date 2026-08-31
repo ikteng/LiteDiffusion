@@ -6,15 +6,20 @@ time-limited hosted quota.
 
 ## Models
 
-| model | params | steps | notes |
-|---|---:|---:|---|
-| [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | ~0.6B | 1 | Smallest and fastest; built specifically for real-time generation. **Default.** |
-| [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | ~1B | 1 | Distilled SD2.1; best quality of the three, still single-step. |
-| [`segmind/tiny-sd`](https://huggingface.co/segmind/tiny-sd) | ~0.5B UNet | 20 | Smaller architecture, but needs more steps, so it isn't the fastest wall-clock option. |
+| model | type | notes |
+|---|---|---|
+| [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | local image | Smallest and fastest; built specifically for real-time generation. **Default.** |
+| [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | local image | Distilled SD2.1; best quality of the local options, still single-step. |
+| `Remote T2I` | online image | Free online inference via Hugging Face API — no local download. |
+| `Remote T2V` | online video | Free online inference via Hugging Face API — no local download. |
 
-All three run through `diffusers.DiffusionPipeline`. The backend auto-detects a CUDA GPU
+Local image models run through `diffusers.DiffusionPipeline`. The backend auto-detects a CUDA GPU
 (`torch.cuda.is_available()`) and uses it in FP16 if present, otherwise falls back to FP32 on CPU. Each pipeline
 is loaded lazily on first use and kept in memory for the rest of the session.
+
+Video generation uses the chosen image model to render a few keyframes, then ffmpeg motion-compensated interpolation
+produces a smooth MP4 — fast and CPU-friendly, with no extra model download. Or you can use the remote T2V option
+for online inference without downloading weights.
 
 ## Running locally
 
@@ -63,10 +68,8 @@ The dev server proxies `/api` and `/outputs` requests to the FastAPI server.
 - `run.py` — single entrypoint for normal use.
 
 The job/history data model carries a `media_type` field (`image` or `video`). Image generation uses the
-distilled models above; video generation (`backend/pipelines.py:generate_video`) renders a few keyframes with
-the chosen image model, then interpolates between them into a short MP4 — fast and CPU-friendly, with no extra
-model download. A heavier real text-to-video model (e.g. AnimateLCM) can later replace that function behind the
-same `media_type: video` path.
+local or remote models above. Video generation can use remote online inference or local keyframe interpolation
+depending on the selected model.
 
 ## Why not MiniMax-H3
 

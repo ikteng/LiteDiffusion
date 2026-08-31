@@ -76,6 +76,11 @@ class ModelInfo(BaseModel):
     steps: int
     guidance_scale: float
     size: int
+    kind: str = "image"
+    quantized: bool = False
+    pipeline: str = "DiffusionPipeline"
+    frame_arg: str = "num_frames"
+    remote: bool = False
 
 
 class ModelListResponse(BaseModel):

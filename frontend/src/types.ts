@@ -58,6 +58,11 @@ export interface ModelInfo {
   steps: number;
   guidance_scale: number;
   size: number;
+  kind: string;
+  quantized: boolean;
+  pipeline: string;
+  frame_arg: string;
+  remote: boolean;
 }
 
 export interface ModelListResponse {

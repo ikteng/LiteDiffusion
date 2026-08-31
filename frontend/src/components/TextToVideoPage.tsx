@@ -82,30 +82,35 @@ export default function TextToVideoPage() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-zinc-300">Model (keyframe source)</label>
-            <select
-              value={modelKey}
-              onChange={(e) => setModelKey(e.target.value)}
-              className="bg-zinc-800 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-600 cursor-pointer"
-            >
-              {models.map((m) => (
-                <option key={m.key} value={m.key}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-            {selectedModel && (
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-zinc-300">Model</label>
+              <select
+                value={modelKey}
+                onChange={(e) => setModelKey(e.target.value)}
+                className="bg-zinc-800 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-600 cursor-pointer"
+              >
+                {models.map((m) => (
+                  <option key={m.key} value={m.key}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+              {selectedModel && (
+                <p className="text-xs text-zinc-500">
+                  {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
+                  {selectedModel.size}px
+                  {selectedModel.quantized && " · 4-bit quantized"}
+                  {selectedModel.remote && " · remote"}
+                </p>
+              )}
               <p className="text-xs text-zinc-500">
-                {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
-                {selectedModel.size}px
+                {selectedModel?.kind === "video"
+                  ? selectedModel?.remote
+                    ? "Generates via free online inference API — no local download. Results may be rate-limited."
+                    : "Generates video frames directly from the prompt using a distilled T2V model. Slower on CPU, better motion."
+                  : "Generates a few keyframes, then uses motion-compensated interpolation for a smooth clip. Fast and CPU-friendly — no extra model download."}
               </p>
-            )}
-            <p className="text-xs text-zinc-500">
-              Generates a few keyframes, then interpolates them into a short clip. Fast and CPU-friendly — no
-              extra model download.
-            </p>
-          </div>
+            </div>
 
           <details className="text-sm text-zinc-400 group">
             <summary className="cursor-pointer font-medium text-zinc-300 select-none">Advanced settings</summary>
