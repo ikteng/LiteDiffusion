@@ -2,9 +2,32 @@ import { useEffect, useState } from "react";
 import { Sparkles, Loader2, Download, ImageOff, Dices } from "lucide-react";
 import { api } from "../api";
 import { useJobPolling } from "../hooks/useJobPolling";
+import { useModelDownloads } from "../hooks/useModelDownloads";
 import type { ModelInfo } from "../types";
 import SettingsPanel from "./SettingsPanel";
 import GalleryTab from "./GalleryTab";
+import CustomSelect from "./CustomSelect";
+
+function DownloadButton({ status, onDownload }: { status: string; onDownload: () => void }) {
+  if (status === "ready") {
+    return <p className="text-xs text-emerald-400">Downloaded</p>;
+  }
+  if (status === "downloading") {
+    return (
+      <p className="text-xs text-zinc-400 flex items-center gap-1">
+        <Loader2 size={12} className="animate-spin" /> Downloading...
+      </p>
+    );
+  }
+  return (
+    <button
+      onClick={onDownload}
+      className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1 cursor-pointer"
+    >
+      <Download size={12} /> Download model
+    </button>
+  );
+}
 
 const EXAMPLE_PROMPTS = [
   "A watercolor fox in a snowy forest",
@@ -26,11 +49,37 @@ export default function TextToImagePage() {
   const job = useJobPolling(jobId);
   const isRunning = job?.status === "queued" || job?.status === "running";
   const selectedModel = models.find((m) => m.key === modelKey);
+  const { downloadModel, getStatus } = useModelDownloads();
+
+  const imageGroups = [
+    {
+      label: "Local",
+      options: models
+        .filter((m) => m.kind === "image" && !m.remote)
+        .map((m) => {
+          const status = getStatus(m.key) as "idle" | "downloading" | "ready";
+          return {
+            value: m.key,
+            label: m.label,
+            downloadStatus: status === "ready" ? undefined : status,
+            onDownload: () => downloadModel(m.key),
+            disabled: false,
+          };
+        }),
+    },
+    {
+      label: "Remote",
+      options: models
+        .filter((m) => m.kind === "image" && m.remote)
+        .map((m) => ({ value: m.key, label: m.label })),
+    },
+  ];
 
   useEffect(() => {
     api.getModels().then((res) => {
       setModels(res.models);
-      setModelKey(res.default);
+      const defaultModel = res.models.find((m) => m.kind === "image") || res.models[0];
+      setModelKey(defaultModel?.key ?? "");
     });
   }, []);
 
@@ -48,6 +97,15 @@ export default function TextToImagePage() {
       setJobId(res.id);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to submit job");
+    }
+  }
+
+  async function handleCancel() {
+    if (!jobId) return;
+    try {
+      await api.cancelJob(jobId);
+    } catch {
+      setSubmitError("Failed to cancel job");
     }
   }
 
@@ -80,23 +138,27 @@ export default function TextToImagePage() {
 
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-medium text-zinc-300">Model</label>
-            <select
+              <CustomSelect
               value={modelKey}
-              onChange={(e) => setModelKey(e.target.value)}
-              className="bg-zinc-800 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-600 cursor-pointer"
-            >
-              {models.map((m) => (
-                <option key={m.key} value={m.key}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
+              onChange={setModelKey}
+              groups={imageGroups}
+              placeholder="Select a model"
+            />
             {selectedModel && (
               <p className="text-xs text-zinc-500">
                 {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
                 {selectedModel.size}px
                 {selectedModel.remote && " · remote"}
               </p>
+            )}
+            {selectedModel && selectedModel.remote && (
+              <p className="text-xs text-zinc-500">{selectedModel.repo}</p>
+            )}
+            {selectedModel && !selectedModel.remote && (
+              <DownloadButton
+                status={getStatus(selectedModel.key)}
+                onDownload={() => downloadModel(selectedModel.key)}
+              />
             )}
           </div>
 
@@ -145,6 +207,14 @@ export default function TextToImagePage() {
             {isRunning ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
             {isRunning ? "Generating…" : "Generate"}
           </button>
+          {isRunning && (
+            <button
+              onClick={handleCancel}
+              className="mt-1 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg py-2.5 font-semibold text-sm cursor-pointer transition-colors border border-zinc-700"
+            >
+              Stop
+            </button>
+          )}
 
           {submitError && (
             <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">

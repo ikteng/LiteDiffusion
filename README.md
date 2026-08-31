@@ -10,16 +10,22 @@ time-limited hosted quota.
 |---|---|---|
 | [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | local image | Smallest and fastest; built specifically for real-time generation. **Default.** |
 | [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | local image | Distilled SD2.1; best quality of the local options, still single-step. |
-| `Remote T2I` | online image | Free online inference via Hugging Face API — no local download. |
-| `Remote T2V` | online video | Free online inference via Hugging Face API — no local download. |
+| [`ali-vilab/text-to-video-ms-1.7b`](https://huggingface.co/ali-vilab/text-to-video-ms-1.7b) | local video | 1.7B parameter text-to-video model. |
+| [`kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s`](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s-Diffusers) | local video | 2B parameter distilled T2V, 16 steps. |
+| [`kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s`](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s-Diffusers) | local video | 2B parameter no-CFG balanced T2V. |
+| [`stabilityai/stable-diffusion-xl-base-1.0`](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) | online image | Free online inference via Hugging Face API — no local download. |
+| [`runwayml/stable-diffusion-v1-5`](https://huggingface.co/runwayml/stable-diffusion-v1-5) | online image | Free online inference via Hugging Face API — no local download. |
+| [`ali-vilab/text-to-video-ms-1.7b`](https://huggingface.co/ali-vilab/text-to-video-ms-1.7b) | online video | Free online inference via Hugging Face API — no local download. |
+| [`guoyww/animatediff`](https://huggingface.co/guoyww/animatediff) | online video | Free online inference via Hugging Face API — no local download. |
 
-Local image models run through `diffusers.DiffusionPipeline`. The backend auto-detects a CUDA GPU
+Local models run through `diffusers.DiffusionPipeline` (or specialized pipelines for T2V). The backend auto-detects a CUDA GPU
 (`torch.cuda.is_available()`) and uses it in FP16 if present, otherwise falls back to FP32 on CPU. Each pipeline
-is loaded lazily on first use and kept in memory for the rest of the session.
+is loaded lazily on first use and kept in memory for the rest of the session. Only the default model
+(`sdxs-512`) is prefetched at startup; heavier models download on first selection.
 
 Video generation uses the chosen image model to render a few keyframes, then ffmpeg motion-compensated interpolation
-produces a smooth MP4 — fast and CPU-friendly, with no extra model download. Or you can use the remote T2V option
-for online inference without downloading weights.
+produces a smooth MP4 — fast and CPU-friendly, with no extra model download. Local T2V models generate frames directly
+for better motion. Or use any remote option for online inference without downloading weights.
 
 ## Running locally
 

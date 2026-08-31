@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .pipelines import ensure_model_available
-from .routes import generate, history, jobs, meta
+from .routes import generate, history, jobs, meta, models
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ app.include_router(generate.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
 app.include_router(history.router, prefix="/api")
 app.include_router(meta.router, prefix="/api")
+app.include_router(models.router, prefix="/api")
 
 app.mount("/outputs", StaticFiles(directory=config.OUTPUTS_DIR), name="outputs")
 

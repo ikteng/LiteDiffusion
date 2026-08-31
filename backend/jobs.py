@@ -2,19 +2,38 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import HTTPException
 
 from . import config, pipelines, store
 from .models import GenerateRequest, HistoryItem, JobResponse, JobResult, JobStatus, MediaType
 
 _executor = ThreadPoolExecutor(max_workers=1)
 _jobs: dict[str, JobResponse] = {}
+_cancel_events: dict[str, threading.Event] = {}
 
 
 def get_job(job_id: str) -> JobResponse | None:
     return _jobs.get(job_id)
+
+
+def cancel_job(job_id: str) -> None:
+    if job_id not in _jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _jobs[job_id]
+    if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+        raise HTTPException(status_code=400, detail="Job cannot be cancelled")
+    event = _cancel_events.get(job_id)
+    if event is None:
+        event = threading.Event()
+        _cancel_events[job_id] = event
+    event.set()
+    job.status = JobStatus.FAILED
+    job.error = "Cancelled by user"
 
 
 def submit_job(request: GenerateRequest) -> JobResponse:
@@ -28,6 +47,7 @@ def submit_job(request: GenerateRequest) -> JobResponse:
         created_at=time.time(),
     )
     _jobs[job_id] = job
+    _cancel_events[job_id] = threading.Event()
     _executor.submit(_run_job, job_id, request)
     return job
 
@@ -38,7 +58,9 @@ def _run_job(job_id: str, request: GenerateRequest) -> None:
 
     try:
         if request.media_type == MediaType.VIDEO:
-            file_path, metadata = pipelines.generate_video(request.prompt, request.model, request.seed)
+            file_path, metadata = pipelines.generate_video(
+                request.prompt, request.model, request.seed, request.duration, _cancel_events[job_id]
+            )
             filename = file_path.name
             relative_file = f"videos/{filename}"
             result = JobResult(
@@ -52,7 +74,9 @@ def _run_job(job_id: str, request: GenerateRequest) -> None:
                 fps=metadata["fps"],
             )
         else:
-            image, metadata = pipelines.generate_image(request.prompt, request.model, request.seed)
+            image, metadata = pipelines.generate_image(
+                request.prompt, request.model, request.seed, _cancel_events[job_id]
+            )
             filename = f"{job_id}.png"
             config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
             image.save(config.IMAGES_DIR / filename)

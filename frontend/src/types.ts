@@ -6,6 +6,7 @@ export interface GenerateRequest {
   model: string;
   seed?: number | null;
   media_type?: MediaType;
+  duration?: number | null;
 }
 
 export interface JobResult {

@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Union
 
@@ -25,6 +26,7 @@ _pipelines: dict[str, DiffusionPipeline] = {}
 
 
 def ensure_model_available(repo: str) -> None:
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     try:
         snapshot_download(repo)
     except Exception as exc:
@@ -112,7 +114,7 @@ def load_pipeline(model_key: str) -> DiffusionPipeline:
     return _pipelines[model_key]
 
 
-def generate_image(prompt: str, model_key: str, seed: int | None):
+def generate_image(prompt: str, model_key: str, seed: int | None, cancel_event: threading.Event | None = None):
     if not prompt or not prompt.strip():
         raise ValueError("Enter a prompt first.")
     if model_key not in config.MODELS:
@@ -120,7 +122,10 @@ def generate_image(prompt: str, model_key: str, seed: int | None):
 
     model_config = config.MODELS[model_key]
 
-    if model_config.get("remote") and config.REMOTE.get("enabled"):
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Cancelled by user")
+
+    if model_config.get("remote"):
         image = _remote_generate_image(prompt, model_config["repo"], model_config["size"], seed)
         metadata = {
             "seed": seed if seed is not None else 0,
@@ -149,6 +154,9 @@ def generate_image(prompt: str, model_key: str, seed: int | None):
         generator=generator,
     )
     elapsed = time.time() - start
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Cancelled by user")
 
     image = result.images[0]
     metadata = {
@@ -211,7 +219,7 @@ def _save_frames_as_video(frames: list[Image.Image], file_path: Path, fps: int) 
     return len(frames)
 
 
-def generate_video(prompt: str, model_key: str, seed: int | None):
+def generate_video(prompt: str, model_key: str, seed: int | None, duration: int | None = None, cancel_event: threading.Event | None = None):
     if not prompt or not prompt.strip():
         raise ValueError("Enter a prompt first.")
     if model_key not in config.MODELS:
@@ -220,10 +228,16 @@ def generate_video(prompt: str, model_key: str, seed: int | None):
     model_config = config.MODELS[model_key]
     size = model_config.get("size", config.VIDEO["size"])
     fps = config.VIDEO["fps"]
-    frame_count = config.VIDEO["keyframes"]
+    duration_seconds = duration if duration is not None else config.VIDEO.get("duration", 5)
+    frame_count = duration_seconds * fps
 
-    if model_config.get("remote") and config.REMOTE.get("enabled"):
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Cancelled by user")
+
+    if model_config.get("remote"):
         file_path, frame_count = _remote_generate_video(prompt, model_config["repo"], size, fps, frame_count)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Cancelled by user")
         elapsed = 0.0
         metadata = {
             "seed": seed if seed is not None else 0,
@@ -235,8 +249,6 @@ def generate_video(prompt: str, model_key: str, seed: int | None):
         }
         return file_path, metadata
 
-    pipe = load_pipeline(model_key)
-
     generator = torch.Generator(device=config.DEVICE)
     if seed is not None and seed >= 0:
         base_seed = int(seed)
@@ -246,16 +258,24 @@ def generate_video(prompt: str, model_key: str, seed: int | None):
     start = time.time()
 
     if model_config.get("kind") == "video":
+        pipe = load_pipeline(model_key)
         frame_gen = torch.Generator(device=config.DEVICE).manual_seed(base_seed)
-        result = pipe(
-            prompt,
+        call_kwargs = dict(
+            prompt=prompt,
             num_inference_steps=model_config["steps"],
             guidance_scale=model_config["guidance_scale"],
             height=size,
             width=size,
             generator=frame_gen,
-            num_frames=frame_count,
         )
+        if model_config.get("frame_arg") == "frames":
+            call_kwargs["frames"] = frame_count
+        else:
+            call_kwargs["num_frames"] = frame_count
+
+        result = pipe(**call_kwargs)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Cancelled by user")
         frames = _extract_frames(result)
         actual_fps = fps
         config.VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
@@ -263,7 +283,10 @@ def generate_video(prompt: str, model_key: str, seed: int | None):
         frame_count = _save_frames_as_video(frames, file_path, actual_fps)
     else:
         keyframes: list[Image.Image] = []
+        pipe = load_pipeline(model_key)
         for i in range(frame_count):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Cancelled by user")
             frame_seed = (base_seed + i) % (2**32)
             frame_gen = torch.Generator(device=config.DEVICE).manual_seed(frame_seed)
             out = pipe(

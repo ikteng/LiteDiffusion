@@ -24,6 +24,7 @@ class GenerateRequest(BaseModel):
     model: str
     seed: int | None = None
     media_type: MediaType = MediaType.IMAGE
+    duration: int | None = None
 
 
 class JobResult(BaseModel):

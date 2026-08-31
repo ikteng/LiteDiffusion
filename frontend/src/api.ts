@@ -23,9 +23,12 @@ export const api = {
   generate: (body: GenerateRequest) =>
     request<JobResponse>("/api/generate", { method: "POST", body: JSON.stringify(body) }),
   getJob: (id: string) => request<JobResponse>(`/api/jobs/${id}`),
+  cancelJob: (id: string) => request<{ status: string }>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   getHistory: (limit = 50, offset = 0) =>
     request<HistoryListResponse>(`/api/history?limit=${limit}&offset=${offset}`),
   deleteHistory: (id: string) => request<void>(`/api/history/${id}`, { method: "DELETE" }),
   getModels: () => request<ModelListResponse>("/api/models"),
   getSettings: () => request<SettingsResponse>("/api/settings"),
+  downloadModel: (key: string) => request<{ status: string }>(`/api/models/${key}/download`, { method: "POST" }),
+  getModelStatus: () => request<Record<string, string>>("/api/models/status"),
 };

@@ -14,3 +14,9 @@ def get_job(job_id: str) -> JobResponse:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict[str, str]:
+    jobs_module.cancel_job(job_id)
+    return {"status": "cancelled"}

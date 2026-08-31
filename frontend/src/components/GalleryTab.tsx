@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Trash2, Images, Loader2, ChevronDown, Video, Download } from "lucide-react";
+import { Trash2, Images, Loader2, ChevronDown, Video, Download, X } from "lucide-react";
 import { api } from "../api";
 import type { HistoryItem } from "../types";
 
@@ -7,6 +7,7 @@ export default function GalleryTab({ refreshKey }: { refreshKey?: number } = {})
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(true);
+  const [clearing, setClearing] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -24,6 +25,17 @@ export default function GalleryTab({ refreshKey }: { refreshKey?: number } = {})
     setItems((prev) => prev.filter((item) => item.id !== id));
   }
 
+  async function handleClearAll() {
+    setClearing(true);
+    try {
+      const res = await api.getHistory();
+      await Promise.all(res.items.map((item) => api.deleteHistory(item.id)));
+      setItems([]);
+    } finally {
+      setClearing(false);
+    }
+  }
+
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
       <button
@@ -35,6 +47,19 @@ export default function GalleryTab({ refreshKey }: { refreshKey?: number } = {})
           Gallery
         </span>
         <div className="flex items-center gap-2">
+          {items.length > 0 && !clearing && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleClearAll();
+              }}
+              title="Clear gallery"
+              className="text-xs text-zinc-500 hover:text-red-400 flex items-center gap-1 cursor-pointer bg-transparent border-none"
+            >
+              <X size={12} /> Clear
+            </button>
+          )}
+          {clearing && <span className="text-xs text-zinc-500">Clearing...</span>}
           <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
             {loading ? "…" : items.length}
           </span>
