@@ -22,6 +22,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   generate: (body: GenerateRequest) =>
     request<JobResponse>("/api/generate", { method: "POST", body: JSON.stringify(body) }),
+  generateImageToVideo: (formData: FormData) =>
+    fetch("/api/generate/image-to-video", { method: "POST", body: formData }).then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? `Request failed: ${res.status}`);
+      }
+      return res.json() as Promise<JobResponse>;
+    }),
   getJob: (id: string) => request<JobResponse>(`/api/jobs/${id}`),
   cancelJob: (id: string) => request<{ status: string }>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   getHistory: (limit = 50, offset = 0) =>

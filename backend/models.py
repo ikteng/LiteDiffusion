@@ -28,6 +28,8 @@ class GenerateRequest(BaseModel):
     negative_prompt: str | None = None
     steps: int | None = None
     guidance_scale: float | None = None
+    reference_image: str | None = None
+    end_image: str | None = None
 
 
 class JobResult(BaseModel):

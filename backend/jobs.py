@@ -59,7 +59,13 @@ def _run_job(job_id: str, request: GenerateRequest) -> None:
     try:
         if request.media_type == MediaType.VIDEO:
             file_path, metadata = pipelines.generate_video(
-                request.prompt, request.model, request.seed, request.duration, _cancel_events[job_id]
+                request.prompt,
+                request.model,
+                request.seed,
+                request.duration,
+                _cancel_events[job_id],
+                reference_image=request.reference_image,
+                end_image=request.end_image,
             )
             filename = file_path.name
             relative_file = f"videos/{filename}"

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 config.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+config.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 CORS(app)

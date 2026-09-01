@@ -237,7 +237,15 @@ def _save_frames_as_video(frames: list[Image.Image], file_path: Path, fps: int) 
     return len(frames)
 
 
-def generate_video(prompt: str, model_key: str, seed: int | None, duration: int | None = None, cancel_event: threading.Event | None = None):
+def generate_video(
+    prompt: str,
+    model_key: str,
+    seed: int | None,
+    duration: int | None = None,
+    cancel_event: threading.Event | None = None,
+    reference_image: str | None = None,
+    end_image: str | None = None,
+):
     if not prompt or not prompt.strip():
         raise ValueError("Enter a prompt first.")
     if model_key not in config.MODELS:
@@ -290,6 +298,15 @@ def generate_video(prompt: str, model_key: str, seed: int | None, duration: int 
             call_kwargs["frames"] = frame_count
         else:
             call_kwargs["num_frames"] = frame_count
+
+        if reference_image:
+            start_img = Image.open(reference_image).convert("RGB").resize((size, size))
+            if end_image and model_config.get("pipeline") == "LTXImageToVideoPipeline":
+                end_img = Image.open(end_image).convert("RGB").resize((size, size))
+                call_kwargs["image"] = [start_img, end_img]
+                call_kwargs["frame_index"] = [0, frame_count - 1]
+            else:
+                call_kwargs["image"] = start_img
 
         result = pipe(**call_kwargs)
         if cancel_event is not None and cancel_event.is_set():

@@ -195,6 +195,36 @@ MODELS = {
         "pipeline": "Kandinsky5T2VPipeline",
         "frame_arg": "num_frames",
     },
+
+    # --- Local image-to-video (reference image + prompt) ---
+    "ltx-video-2b-i2v": {
+        "label": "LTX-Video 2B — image-to-video",
+        "repo": "Lightricks/LTX-Video",
+        "steps": 30,
+        "guidance_scale": 4.5,
+        "size": 512,
+        "kind": "image_to_video",
+        "quantized": False,
+        "remote": False,
+        "provider": "local",
+        "approx_size_mb": 28000,
+        "pipeline": "LTXImageToVideoPipeline",
+        "frame_arg": "num_frames",
+    },
+    "kandinsky-5-i2v-lite": {
+        "label": "Kandinsky 5.0 I2V-Lite",
+        "repo": "kandinskylab/Kandinsky-5.0-I2V-Lite-5s-Diffusers",
+        "steps": 50,
+        "guidance_scale": 5.0,
+        "size": 512,
+        "kind": "image_to_video",
+        "quantized": False,
+        "remote": False,
+        "provider": "local",
+        "approx_size_mb": 24000,
+        "pipeline": "Kandinsky5I2VPipeline",
+        "frame_arg": "num_frames",
+    },
 }
 DEFAULT_MODEL = "sdxs-512"
 
@@ -202,6 +232,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = REPO_ROOT / "outputs"
 IMAGES_DIR = OUTPUTS_DIR / "images"
 VIDEOS_DIR = OUTPUTS_DIR / "videos"
+UPLOADS_DIR = OUTPUTS_DIR / "uploads"
 INDEX_PATH = OUTPUTS_DIR / "index.json"
 FRONTEND_DIST_DIR = REPO_ROOT / "frontend" / "dist"
 
