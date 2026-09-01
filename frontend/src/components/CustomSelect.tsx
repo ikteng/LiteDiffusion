@@ -44,10 +44,10 @@ export default function CustomSelect({ value, onChange, groups, placeholder }: C
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between bg-zinc-800 rounded-lg p-2.5 text-sm text-left outline-none focus:ring-2 focus:ring-violet-600 cursor-pointer"
+        className="w-full flex items-center justify-between gap-2 bg-zinc-800 rounded-lg p-2.5 text-sm text-left outline-none focus:ring-2 focus:ring-violet-600 cursor-pointer"
       >
-        <span className={value ? "text-zinc-200" : "text-zinc-500"}>{selectedLabel}</span>
-        <ChevronDown size={14} className="text-zinc-400 transition-transform" />
+        <span className={`truncate min-w-0 ${value ? "text-zinc-200" : "text-zinc-500"}`}>{selectedLabel}</span>
+        <ChevronDown size={14} className="text-zinc-400 transition-transform shrink-0" />
       </button>
 
       {open && (
@@ -83,11 +83,11 @@ export default function CustomSelect({ value, onChange, groups, placeholder }: C
                         setOpen(false);
                       }}
                       disabled={!!opt.disabled}
-                      className={`flex items-center gap-2 text-left flex-1 ${notDownloaded ? "text-zinc-500" : "text-zinc-200"}`}
+                      className={`flex items-center gap-2 text-left flex-1 min-w-0 ${notDownloaded ? "text-zinc-500" : "text-zinc-200"}`}
                     >
-                      <span>{opt.label}</span>
-                      {opt.sublabel && <span className="text-xs text-zinc-500">· {opt.sublabel}</span>}
-                      {opt.value === value && <Check size={12} className="text-violet-400 ml-auto" />}
+                      <span className="truncate min-w-0">{opt.label}</span>
+                      {opt.sublabel && <span className="text-xs text-zinc-500 shrink-0">· {opt.sublabel}</span>}
+                      {opt.value === value && <Check size={12} className="text-violet-400 ml-auto shrink-0" />}
                     </button>
                     {opt.downloadStatus && opt.downloadStatus !== "ready" && opt.onDownload && (
                       <button

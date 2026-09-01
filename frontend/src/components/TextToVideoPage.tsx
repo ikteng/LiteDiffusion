@@ -61,7 +61,8 @@ export default function TextToVideoPage() {
   useEffect(() => {
     api.getModels().then((res) => {
       setModels(res.models);
-      const defaultModel = res.models.find((m) => m.kind === "video") || res.models[0];
+      const videoModels = res.models.filter((m) => m.kind === "video");
+      const defaultModel = videoModels.find((m) => m.label.includes("Recommended")) || videoModels[0];
       setModelKey(defaultModel?.key ?? "");
     });
   }, []);

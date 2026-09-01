@@ -65,7 +65,8 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
   useEffect(() => {
     api.getModels().then((res) => {
       setModels(res.models);
-      const defaultModel = res.models.find((m) => m.kind === "image_to_video");
+      const i2vModels = res.models.filter((m) => m.kind === "image_to_video");
+      const defaultModel = i2vModels.find((m) => m.label.includes("Recommended")) || i2vModels[0];
       setModelKey(defaultModel?.key ?? "");
     });
   }, []);
@@ -126,7 +127,8 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
     setEndImageFile(file);
   }
 
-  const canGenerate = prompt.trim() && imageFile && (mode !== "first-last" || endImageFile);
+  const promptRequired = selectedModel?.requires_prompt ?? true;
+  const canGenerate = (!promptRequired || prompt.trim()) && imageFile && (mode !== "first-last" || endImageFile);
 
   async function handleGenerate() {
     if (!canGenerate || isRunning) return;
@@ -250,11 +252,17 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
           )}
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-zinc-300">Prompt</label>
+            <label className="text-sm font-medium text-zinc-300">
+              Prompt {!promptRequired && <span className="text-zinc-500 font-normal">(optional)</span>}
+            </label>
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe the motion you want, e.g. gentle wind, slow zoom in"
+              placeholder={
+                promptRequired
+                  ? "Describe the motion you want, e.g. gentle wind, slow zoom in"
+                  : "This model animates the image directly — a prompt isn't required"
+              }
               rows={3}
               className="bg-zinc-800 rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-violet-600 placeholder:text-zinc-600"
             />

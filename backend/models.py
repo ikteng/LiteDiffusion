@@ -20,7 +20,7 @@ class JobStatus(str, Enum):
 
 
 class GenerateRequest(BaseModel):
-    prompt: str
+    prompt: str = ""
     model: str
     seed: int | None = None
     media_type: MediaType = MediaType.IMAGE
@@ -89,6 +89,7 @@ class ModelInfo(BaseModel):
     remote: bool = False
     provider: str = "local"
     approx_size_mb: int = 0
+    requires_prompt: bool = True
 
 
 class ModelListResponse(BaseModel):

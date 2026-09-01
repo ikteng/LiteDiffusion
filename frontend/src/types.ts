@@ -69,6 +69,7 @@ export interface ModelInfo {
   remote: boolean;
   provider: string;
   approx_size_mb: number;
+  requires_prompt: boolean;
 }
 
 export interface ModelListResponse {

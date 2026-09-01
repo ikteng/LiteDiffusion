@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import logging
 import os
@@ -246,12 +247,14 @@ def generate_video(
     reference_image: str | None = None,
     end_image: str | None = None,
 ):
-    if not prompt or not prompt.strip():
-        raise ValueError("Enter a prompt first.")
     if model_key not in config.MODELS:
         raise ValueError(f"Unknown model '{model_key}'. Valid models: {', '.join(config.MODELS)}")
 
     model_config = config.MODELS[model_key]
+    requires_prompt = model_config.get("requires_prompt", True)
+    if requires_prompt and (not prompt or not prompt.strip()):
+        raise ValueError("Enter a prompt first.")
+
     size = model_config.get("size", config.VIDEO["size"])
     fps = config.VIDEO["fps"]
     duration_seconds = duration if duration is not None else config.VIDEO.get("duration", 5)
@@ -287,13 +290,14 @@ def generate_video(
         pipe = load_pipeline(model_key)
         frame_gen = torch.Generator(device=config.DEVICE).manual_seed(base_seed)
         call_kwargs = dict(
-            prompt=prompt,
             num_inference_steps=model_config["steps"],
             guidance_scale=model_config["guidance_scale"],
             height=size,
             width=size,
             generator=frame_gen,
         )
+        if requires_prompt:
+            call_kwargs["prompt"] = prompt
         if model_config.get("frame_arg") == "frames":
             call_kwargs["frames"] = frame_count
         else:
@@ -307,6 +311,9 @@ def generate_video(
                 call_kwargs["frame_index"] = [0, frame_count - 1]
             else:
                 call_kwargs["image"] = start_img
+
+        accepted_params = inspect.signature(pipe.__call__).parameters
+        call_kwargs = {k: v for k, v in call_kwargs.items() if k in accepted_params}
 
         result = pipe(**call_kwargs)
         if cancel_event is not None and cancel_event.is_set():
