@@ -1,22 +1,26 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response
+from flask import Blueprint, abort, jsonify, request
 
 from .. import store
-from ..models import HistoryListResponse
 
-router = APIRouter()
+bp = Blueprint("history", __name__)
 
 
-@router.get("/history", response_model=HistoryListResponse)
-def list_history(limit: int = 50, offset: int = 0) -> HistoryListResponse:
+@bp.get("/history")
+def list_history():
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
     items, total = store.list_history(limit=limit, offset=offset)
-    return HistoryListResponse(items=items, total=total)
+    return jsonify({
+        "items": [item.model_dump(mode="json") for item in items],
+        "total": total,
+    })
 
 
-@router.delete("/history/{item_id}", status_code=204)
-def delete_history(item_id: str) -> Response:
+@bp.delete("/history/<item_id>")
+def delete_history(item_id: str):
     removed = store.delete_history(item_id)
     if not removed:
-        raise HTTPException(status_code=404, detail="History item not found")
-    return Response(status_code=204)
+        abort(404, description="History item not found")
+    return "", 204

@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from flask import Blueprint, abort, jsonify, request
+from pydantic import ValidationError
 
 from .. import config, jobs
-from ..models import GenerateRequest, JobResponse
+from ..models import GenerateRequest
 
-router = APIRouter()
+bp = Blueprint("generate", __name__)
 
 
-@router.post("/generate", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
-def generate(request: GenerateRequest) -> JobResponse:
-    if request.model not in config.MODELS:
+@bp.post("/generate")
+def generate():
+    try:
+        payload = GenerateRequest.model_validate(request.get_json(force=True))
+    except ValidationError as exc:
+        abort(422, description=exc.errors())
+
+    if payload.model not in config.MODELS:
         valid = ", ".join(config.MODELS)
-        raise HTTPException(status_code=400, detail=f"Unknown model '{request.model}'. Valid models: {valid}")
+        abort(400, description=f"Unknown model '{payload.model}'. Valid models: {valid}")
 
-    return jobs.submit_job(request)
+    job = jobs.submit_job(payload)
+    return jsonify(job.model_dump(mode="json")), 202

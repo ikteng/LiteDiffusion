@@ -1,49 +1,25 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, Cpu, Zap, ExternalLink, Download, Loader2 } from "lucide-react";
+import { ChevronDown, Cpu, Zap, ExternalLink } from "lucide-react";
 import { api } from "../api";
 import type { ModelInfo, SettingsResponse } from "../types";
+import { formatModelSize, sortModelsBySize } from "../utils";
 
-function DownloadButton({ status, onDownload }: { status: string; onDownload: () => void }) {
-  if (status === "ready") {
-    return <span className="text-xs text-emerald-400">Downloaded</span>;
-  }
-  if (status === "downloading") {
-    return (
-      <span className="text-xs text-zinc-400 flex items-center gap-1">
-        <Loader2 size={12} className="animate-spin" /> Downloading...
-      </span>
-    );
-  }
-  return (
-    <button
-      onClick={onDownload}
-      className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1 cursor-pointer"
-    >
-      <Download size={12} /> Download
-    </button>
-  );
-}
-
-export default function SettingsPanel() {
+export default function SettingsPanel({ kind = "image" }: { kind?: "image" | "video" }) {
   const [open, setOpen] = useState(false);
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [downloadStatuses, setDownloadStatuses] = useState<Record<string, string>>({});
 
   useEffect(() => {
     api.getSettings().then(setSettings);
-    api.getModels().then((res) => setModels(res.models));
-    api.getModelStatus().then(setDownloadStatuses);
-  }, []);
+    api.getModels().then((res) => {
+      const filtered = res.models.filter((m) => m.kind === kind);
+      const local = sortModelsBySize(filtered.filter((m) => !m.remote));
+      const remote = filtered.filter((m) => m.remote);
+      setModels([...local, ...remote]);
+    });
+  }, [kind]);
 
   const isGpu = settings?.device === "cuda";
-
-  const downloadModel = async (key: string) => {
-    await api.downloadModel(key);
-    setDownloadStatuses((prev) => ({ ...prev, [key]: "downloading" }));
-  };
-
-  const getStatus = (key: string) => downloadStatuses[key] ?? "idle";
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
@@ -113,12 +89,7 @@ export default function SettingsPanel() {
                   <p>
                     {m.size}×{m.size}px
                   </p>
-                  {!m.remote && (
-                    <DownloadButton
-                      status={getStatus(m.key)}
-                      onDownload={() => downloadModel(m.key)}
-                    />
-                  )}
+                  {m.approx_size_mb > 0 && <p>{formatModelSize(m.approx_size_mb)}</p>}
                 </div>
               </a>
             ))}

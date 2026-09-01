@@ -7,7 +7,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import HTTPException
+from flask import abort
 
 from . import config, pipelines, store
 from .models import GenerateRequest, HistoryItem, JobResponse, JobResult, JobStatus, MediaType
@@ -23,10 +23,10 @@ def get_job(job_id: str) -> JobResponse | None:
 
 def cancel_job(job_id: str) -> None:
     if job_id not in _jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+        abort(404, description="Job not found")
     job = _jobs[job_id]
     if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
-        raise HTTPException(status_code=400, detail="Job cannot be cancelled")
+        abort(400, description="Job cannot be cancelled")
     event = _cancel_events.get(job_id)
     if event is None:
         event = threading.Event()
@@ -75,7 +75,13 @@ def _run_job(job_id: str, request: GenerateRequest) -> None:
             )
         else:
             image, metadata = pipelines.generate_image(
-                request.prompt, request.model, request.seed, _cancel_events[job_id]
+                request.prompt,
+                request.model,
+                request.seed,
+                _cancel_events[job_id],
+                negative_prompt=request.negative_prompt,
+                steps=request.steps,
+                guidance_scale=request.guidance_scale,
             )
             filename = f"{job_id}.png"
             config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)

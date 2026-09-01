@@ -1,0 +1,13 @@
+{
+  "IDKiro/sdxs-512-0.9": 4380,
+  "tianweiy/DMD2": 263322,
+  "latent-consistency/lcm-lora-sdxl": 394,
+  "Efficient-Large-Model/Sana_600M_512px_diffusers": 14074,
+  "PixArt-alpha/PixArt-Sigma-XL-2-512-MS": 2443,
+  "segmind/tiny-sd": 1061,
+  "Lightricks/LTX-Video": 253809,
+  "Lightricks/LTX-Video-0.9.7-distilled": 47628,
+  "ali-vilab/text-to-video-ms-1.7b": 14683,
+  "kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s-Diffusers": 25565,
+  "kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s-Diffusers": 25565
+}

@@ -5,9 +5,8 @@ from __future__ import annotations
 import os
 import webbrowser
 
-import uvicorn
-
 from backend import config
+from backend.main import app
 
 HOST = os.environ.get("LITEDIFFUSION_HOST", "127.0.0.1")
 PORT = int(os.environ.get("LITEDIFFUSION_PORT", "8000"))
@@ -32,7 +31,7 @@ def main() -> None:
             webbrowser.open(f"http://{HOST}:{PORT}")
         except Exception:
             pass
-    uvicorn.run("backend.main:app", host=HOST, port=PORT)
+    app.run(host=HOST, port=PORT)
 
 
 if __name__ == "__main__":

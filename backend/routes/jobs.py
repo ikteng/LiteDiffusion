@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from flask import Blueprint, abort, jsonify
 
 from .. import jobs as jobs_module
-from ..models import JobResponse
 
-router = APIRouter()
+bp = Blueprint("jobs", __name__)
 
 
-@router.get("/jobs/{job_id}", response_model=JobResponse)
-def get_job(job_id: str) -> JobResponse:
+@bp.get("/jobs/<job_id>")
+def get_job(job_id: str):
     job = jobs_module.get_job(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+        abort(404, description="Job not found")
+    return jsonify(job.model_dump(mode="json"))
 
 
-@router.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: str) -> dict[str, str]:
+@bp.post("/jobs/<job_id>/cancel")
+def cancel_job(job_id: str):
     jobs_module.cancel_job(job_id)
-    return {"status": "cancelled"}
+    return jsonify({"status": "cancelled"})

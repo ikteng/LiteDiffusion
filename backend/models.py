@@ -25,6 +25,9 @@ class GenerateRequest(BaseModel):
     seed: int | None = None
     media_type: MediaType = MediaType.IMAGE
     duration: int | None = None
+    negative_prompt: str | None = None
+    steps: int | None = None
+    guidance_scale: float | None = None
 
 
 class JobResult(BaseModel):
@@ -82,6 +85,8 @@ class ModelInfo(BaseModel):
     pipeline: str = "DiffusionPipeline"
     frame_arg: str = "num_frames"
     remote: bool = False
+    provider: str = "local"
+    approx_size_mb: int = 0
 
 
 class ModelListResponse(BaseModel):

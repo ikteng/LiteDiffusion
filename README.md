@@ -10,7 +10,8 @@ time-limited hosted quota.
 |---|---|---|
 | [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | local image | Smallest and fastest; built specifically for real-time generation. **Default.** |
 | [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | local image | Distilled SD2.1; best quality of the local options, still single-step. |
-| [`ali-vilab/text-to-video-ms-1.7b`](https://huggingface.co/ali-vilab/text-to-video-ms-1.7b) | local video | 1.7B parameter text-to-video model. |
+| [`nota-ai/bk-sdm-tiny`](https://huggingface.co/nota-ai/bk-sdm-tiny) | local image | Block-pruned + distilled SD1.4, ~0.5B params; smallest SD-architecture option. |
+| [`ali-vilab/text-to-video-ms-1.7b`](https://huggingface.co/ali-vilab/text-to-video-ms-1.7b) | local video | 1.7B parameter text-to-video model; smallest local video download. **Default.** |
 | [`kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s`](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s-Diffusers) | local video | 2B parameter distilled T2V, 16 steps. |
 | [`kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s`](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s-Diffusers) | local video | 2B parameter no-CFG balanced T2V. |
 | [`stabilityai/stable-diffusion-xl-base-1.0`](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) | online image | Free online inference via Hugging Face API — no local download. |

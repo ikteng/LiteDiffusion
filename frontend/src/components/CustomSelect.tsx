@@ -52,11 +52,13 @@ export default function CustomSelect({ value, onChange, groups, placeholder }: C
 
       {open && (
         <div className="absolute z-20 mt-1 w-full bg-zinc-800 border border-zinc-700 rounded-lg shadow-lg max-h-72 overflow-y-auto">
-          {groups.map((group) => (
-            <div key={group.label}>
-              <div className="px-2.5 py-1.5 text-xs font-medium text-zinc-500 uppercase tracking-wider">
-                {group.label}
-              </div>
+          {groups.filter((g) => g.options.length > 0).map((group, idx) => (
+            <div key={group.label || idx} className={idx > 0 ? "border-t border-zinc-700" : ""}>
+              {group.label && (
+                <div className="px-2.5 py-1.5 text-xs font-medium text-zinc-500 uppercase tracking-wider">
+                  {group.label}
+                </div>
+              )}
                {group.options.map((opt) => {
                 const notDownloaded = opt.downloadStatus && opt.downloadStatus !== "ready";
                 const tooltip = notDownloaded

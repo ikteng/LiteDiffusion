@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import { Video, Sparkles, Loader2, Download, ImageOff, Dices, Clock } from "lucide-react";
+import { Video, Sparkles, Loader2, Download, ImageOff, Dices, Clock, Square } from "lucide-react";
 import { api } from "../api";
 import { useJobPolling } from "../hooks/useJobPolling";
 import { useModelDownloads } from "../hooks/useModelDownloads";
 import type { ModelInfo } from "../types";
+import { formatModelSize, sortModelsBySize } from "../utils";
 import GalleryTab from "./GalleryTab";
 import CustomSelect from "./CustomSelect";
+import SettingsPanel from "./SettingsPanel";
 
 const EXAMPLE_PROMPTS = [
   "A watercolor fox wandering through a snowy forest",
@@ -41,24 +43,18 @@ export default function TextToVideoPage() {
 
   const videoGroups = [
     {
-      label: "Local",
-      options: models
-        .filter((m) => m.kind === "video" && !m.remote)
+      label: "",
+      options: sortModelsBySize(models.filter((m) => m.kind === "video" && !m.remote))
         .map((m) => {
           const status = getStatus(m.key) as "idle" | "downloading" | "ready";
           return {
             value: m.key,
             label: m.label,
+            sublabel: formatModelSize(m.approx_size_mb),
             downloadStatus: status === "ready" ? undefined : status,
             onDownload: () => downloadModel(m.key),
           };
         }),
-    },
-    {
-      label: "Remote",
-      options: models
-        .filter((m) => m.kind === "video" && m.remote)
-        .map((m) => ({ value: m.key, label: m.label })),
     },
   ];
 
@@ -141,6 +137,7 @@ export default function TextToVideoPage() {
               <p className="text-xs text-zinc-500">
                 {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
                 {selectedModel.size}px
+                {selectedModel.approx_size_mb > 0 && ` · ${formatModelSize(selectedModel.approx_size_mb)}`}
                 {selectedModel.quantized && " · 4-bit quantized"}
                 {selectedModel.remote && " · remote"}
               </p>
@@ -151,7 +148,9 @@ export default function TextToVideoPage() {
             <p className="text-xs text-zinc-500">
               {selectedModel?.kind === "video"
                 ? selectedModel?.remote
-                  ? "Generates via free online inference API — no local download. Results may be rate-limited."
+                  ? selectedModel?.provider === "pollinations"
+                    ? "Generates via Pollinations.ai — free, no API token required, no local download."
+                    : "Generates via Hugging Face Inference API — requires HF token, free tier rate-limited."
                   : "Generates video frames directly from the prompt using a distilled T2V model. Slower on CPU, better motion."
                 : "Generates a few keyframes, then uses motion-compensated interpolation for a smooth clip. Fast and CPU-friendly — no extra model download."}
             </p>
@@ -176,16 +175,6 @@ export default function TextToVideoPage() {
           <details className="text-sm text-zinc-400 group">
             <summary className="cursor-pointer font-medium text-zinc-300 select-none">Advanced settings</summary>
             <div className="mt-3 flex flex-col gap-2 border-t border-zinc-800 pt-3">
-              <label className="flex items-center gap-2 cursor-pointer w-fit">
-                <input
-                  type="checkbox"
-                  checked={randomSeed}
-                  onChange={(e) => setRandomSeed(e.target.checked)}
-                  className="accent-violet-600"
-                />
-                <Dices size={14} />
-                Random seed
-              </label>
               <div className="flex items-center gap-3">
                 <input
                   type="range"
@@ -207,25 +196,39 @@ export default function TextToVideoPage() {
                   className="bg-zinc-800 rounded-lg p-2 text-sm outline-none w-28 disabled:opacity-40"
                 />
               </div>
+              <label className="flex items-center gap-2 cursor-pointer w-fit">
+                <input
+                  type="checkbox"
+                  checked={randomSeed}
+                  onChange={(e) => setRandomSeed(e.target.checked)}
+                  className="accent-violet-600"
+                />
+                <Dices size={14} />
+                Random seed
+              </label>
             </div>
           </details>
 
-          <button
-            onClick={handleGenerate}
-            disabled={isRunning || !prompt.trim()}
-            className="mt-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg py-2.5 font-semibold text-sm cursor-pointer transition-colors"
-          >
-            {isRunning ? <Loader2 size={16} className="animate-spin" /> : <Video size={16} />}
-            {isRunning ? "Generating…" : "Generate video"}
-          </button>
-          {isRunning && (
+          <div className="mt-1 flex items-stretch gap-2">
             <button
-              onClick={handleCancel}
-              className="mt-1 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg py-2.5 font-semibold text-sm cursor-pointer transition-colors border border-zinc-700"
+              onClick={handleGenerate}
+              disabled={isRunning || !prompt.trim()}
+              className="flex-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg py-2.5 font-semibold text-sm cursor-pointer transition-colors"
             >
-              Stop
+              {isRunning ? <Loader2 size={16} className="animate-spin" /> : <Video size={16} />}
+              {isRunning ? "Generating…" : "Generate video"}
             </button>
-          )}
+            {isRunning && (
+              <button
+                onClick={handleCancel}
+                title="Stop generation"
+                aria-label="Stop generation"
+                className="flex items-center justify-center w-10 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg cursor-pointer transition-colors border border-zinc-700"
+              >
+                <Square size={14} fill="currentColor" />
+              </button>
+            )}
+          </div>
 
           {submitError && (
             <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
@@ -285,6 +288,8 @@ export default function TextToVideoPage() {
           )}
         </div>
       </div>
+
+      <SettingsPanel kind="video" />
 
       <GalleryTab refreshKey={galleryRefreshKey} />
     </div>

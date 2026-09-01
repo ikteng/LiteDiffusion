@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Union
 
 import imageio.v2 as imageio
@@ -77,6 +78,12 @@ def _remote_generate_video(prompt: str, model_repo: str, size: int, fps: int, fr
     return file_path, frame_count
 
 
+def _resolve_seed(seed: int | None) -> int:
+    if seed is None or seed < 0:
+        return int(time.time() * 1000) % (2**31)
+    return int(seed)
+
+
 def load_pipeline(model_key: str) -> DiffusionPipeline:
     if model_key not in _pipelines:
         repo = config.MODELS[model_key]["repo"]
@@ -114,7 +121,15 @@ def load_pipeline(model_key: str) -> DiffusionPipeline:
     return _pipelines[model_key]
 
 
-def generate_image(prompt: str, model_key: str, seed: int | None, cancel_event: threading.Event | None = None):
+def generate_image(
+    prompt: str,
+    model_key: str,
+    seed: int | None,
+    cancel_event: threading.Event | None = None,
+    negative_prompt: str | None = None,
+    steps: int | None = None,
+    guidance_scale: float | None = None,
+):
     if not prompt or not prompt.strip():
         raise ValueError("Enter a prompt first.")
     if model_key not in config.MODELS:
@@ -128,7 +143,7 @@ def generate_image(prompt: str, model_key: str, seed: int | None, cancel_event: 
     if model_config.get("remote"):
         image = _remote_generate_image(prompt, model_config["repo"], model_config["size"], seed)
         metadata = {
-            "seed": seed if seed is not None else 0,
+            "seed": _resolve_seed(seed),
             "width": model_config["size"],
             "height": model_config["size"],
             "elapsed_seconds": 0.0,
@@ -144,15 +159,18 @@ def generate_image(prompt: str, model_key: str, seed: int | None, cancel_event: 
     else:
         resolved_seed = generator.seed()
 
-    start = time.time()
-    result = pipe(
-        prompt,
-        num_inference_steps=model_config["steps"],
-        guidance_scale=model_config["guidance_scale"],
+    call_kwargs = dict(
+        num_inference_steps=steps if steps is not None else model_config["steps"],
+        guidance_scale=guidance_scale if guidance_scale is not None else model_config["guidance_scale"],
         height=model_config["size"],
         width=model_config["size"],
         generator=generator,
     )
+    if negative_prompt:
+        call_kwargs["negative_prompt"] = negative_prompt
+
+    start = time.time()
+    result = pipe(prompt, **call_kwargs)
     elapsed = time.time() - start
 
     if cancel_event is not None and cancel_event.is_set():
@@ -240,7 +258,7 @@ def generate_video(prompt: str, model_key: str, seed: int | None, duration: int 
             raise RuntimeError("Cancelled by user")
         elapsed = 0.0
         metadata = {
-            "seed": seed if seed is not None else 0,
+            "seed": _resolve_seed(seed),
             "width": size,
             "height": size,
             "frames": frame_count,

@@ -7,6 +7,9 @@ export interface GenerateRequest {
   seed?: number | null;
   media_type?: MediaType;
   duration?: number | null;
+  negative_prompt?: string | null;
+  steps?: number | null;
+  guidance_scale?: number | null;
 }
 
 export interface JobResult {
@@ -64,6 +67,8 @@ export interface ModelInfo {
   pipeline: string;
   frame_arg: string;
   remote: boolean;
+  provider: string;
+  approx_size_mb: number;
 }
 
 export interface ModelListResponse {
