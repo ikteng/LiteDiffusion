@@ -9,7 +9,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
-from .pipelines import ensure_model_available
 from .routes import generate, history, jobs, meta, models
 
 logger = logging.getLogger(__name__)
@@ -20,14 +19,9 @@ config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="LiteDiffusion")
 
 
-@app.on_event("startup")
-def _prefetch_models() -> None:
-    default_repo = config.MODELS[config.DEFAULT_MODEL]["repo"]
-    logger.info("Prefetching default model: %s", default_repo)
-    try:
-        ensure_model_available(default_repo)
-    except Exception as exc:
-        logger.warning("Default model prefetch failed: %s", exc)
+# Startup prefetch is intentionally disabled — large models (e.g. sdxs-512 ~4GB,
+# text-to-video ~7GB) were being re-downloaded on every uvicorn --reload restart.
+# Trigger downloads explicitly via POST /api/models/{model_key}/download instead.
 
 
 app.include_router(generate.router, prefix="/api")
