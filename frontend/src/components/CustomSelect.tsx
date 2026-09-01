@@ -57,48 +57,57 @@ export default function CustomSelect({ value, onChange, groups, placeholder }: C
               <div className="px-2.5 py-1.5 text-xs font-medium text-zinc-500 uppercase tracking-wider">
                 {group.label}
               </div>
-              {group.options.map((opt) => (
-                <div
-                  key={opt.value}
-                  className={`flex items-center justify-between px-2.5 py-1.5 text-sm ${
-                    opt.disabled
-                      ? "opacity-40 cursor-not-allowed"
-                      : "hover:bg-zinc-700/50 cursor-pointer"
-                  }`}
-                >
-                  <button
-                    onClick={() => {
-                      if (opt.disabled || opt.onDownload) return;
-                      onChange(opt.value);
-                      setOpen(false);
-                    }}
-                    disabled={!!opt.disabled}
-                    className="flex items-center gap-2 text-left flex-1"
+               {group.options.map((opt) => {
+                const notDownloaded = opt.downloadStatus && opt.downloadStatus !== "ready";
+                const tooltip = notDownloaded
+                  ? opt.downloadStatus === "downloading"
+                    ? "Downloading…"
+                    : "Not downloaded. Click the download button to use this model."
+                  : undefined;
+                return (
+                  <div
+                    key={opt.value}
+                    title={tooltip}
+                    className={`flex items-center justify-between px-2.5 py-1.5 text-sm ${
+                      opt.disabled
+                        ? "opacity-40 cursor-not-allowed"
+                        : "hover:bg-zinc-700/50 cursor-pointer"
+                    }`}
                   >
-                    <span>{opt.label}</span>
-                    {opt.sublabel && <span className="text-xs text-zinc-500">· {opt.sublabel}</span>}
-                    {opt.value === value && <Check size={12} className="text-violet-400 ml-auto" />}
-                  </button>
-                  {opt.downloadStatus && opt.downloadStatus !== "ready" && opt.onDownload && (
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        opt.onDownload!();
+                      onClick={() => {
+                        if (opt.disabled || notDownloaded) return;
+                        onChange(opt.value);
+                        setOpen(false);
                       }}
-                      className={`ml-2 p-1 rounded hover:bg-zinc-700 ${
-                        opt.downloadStatus === "downloading" ? "text-zinc-300" : "text-violet-400"
-                      }`}
-                      title="Download model"
+                      disabled={!!opt.disabled}
+                      className={`flex items-center gap-2 text-left flex-1 ${notDownloaded ? "text-zinc-500" : "text-zinc-200"}`}
                     >
-                      {opt.downloadStatus === "downloading" ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <Download size={12} />
-                      )}
+                      <span>{opt.label}</span>
+                      {opt.sublabel && <span className="text-xs text-zinc-500">· {opt.sublabel}</span>}
+                      {opt.value === value && <Check size={12} className="text-violet-400 ml-auto" />}
                     </button>
-                  )}
-                </div>
-              ))}
+                    {opt.downloadStatus && opt.downloadStatus !== "ready" && opt.onDownload && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          opt.onDownload!();
+                        }}
+                        className={`ml-2 p-1 rounded hover:bg-zinc-700 ${
+                          opt.downloadStatus === "downloading" ? "text-zinc-300" : "text-violet-400"
+                        }`}
+                        title="Download model"
+                      >
+                        {opt.downloadStatus === "downloading" ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <Download size={12} />
+                        )}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ))}
         </div>

@@ -7,32 +7,20 @@ import type { ModelInfo } from "../types";
 import GalleryTab from "./GalleryTab";
 import CustomSelect from "./CustomSelect";
 
-function DownloadButton({ status, onDownload }: { status: string; onDownload: () => void }) {
-  if (status === "ready") {
-    return <p className="text-xs text-emerald-400">Downloaded</p>;
-  }
-  if (status === "downloading") {
-    return (
-      <p className="text-xs text-zinc-400 flex items-center gap-1">
-        <Loader2 size={12} className="animate-spin" /> Downloading...
-      </p>
-    );
-  }
-  return (
-    <button
-      onClick={onDownload}
-      className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1 cursor-pointer"
-    >
-      <Download size={12} /> Download model
-    </button>
-  );
-}
-
 const EXAMPLE_PROMPTS = [
   "A watercolor fox wandering through a snowy forest",
   "Neon-lit cyberpunk alley, rain rippling on the ground",
   "Cozy cabin in autumn, leaves drifting in warm light",
   "Astronaut floating above Mars, slow gentle drift",
+];
+
+const DURATION_OPTIONS = [
+  { value: "2", label: "2 seconds" },
+  { value: "4", label: "4 seconds" },
+  { value: "5", label: "5 seconds" },
+  { value: "8", label: "8 seconds" },
+  { value: "10", label: "10 seconds" },
+  { value: "12", label: "12 seconds" },
 ];
 
 export default function TextToVideoPage() {
@@ -49,10 +37,30 @@ export default function TextToVideoPage() {
   const job = useJobPolling(jobId);
   const isRunning = job?.status === "queued" || job?.status === "running";
   const selectedModel = models.find((m) => m.key === modelKey);
-  const videoModels = models.filter((m) => m.kind === "video");
-  const localVideoModels = videoModels.filter((m) => !m.remote);
-  const remoteVideoModels = videoModels.filter((m) => m.remote);
   const { downloadModel, getStatus } = useModelDownloads();
+
+  const videoGroups = [
+    {
+      label: "Local",
+      options: models
+        .filter((m) => m.kind === "video" && !m.remote)
+        .map((m) => {
+          const status = getStatus(m.key) as "idle" | "downloading" | "ready";
+          return {
+            value: m.key,
+            label: m.label,
+            downloadStatus: status === "ready" ? undefined : status,
+            onDownload: () => downloadModel(m.key),
+          };
+        }),
+    },
+    {
+      label: "Remote",
+      options: models
+        .filter((m) => m.kind === "video" && m.remote)
+        .map((m) => ({ value: m.key, label: m.label })),
+    },
+  ];
 
   useEffect(() => {
     api.getModels().then((res) => {
@@ -121,70 +129,49 @@ export default function TextToVideoPage() {
             </div>
           </div>
 
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-zinc-300">Model</label>
-              <CustomSelect
-                value={modelKey}
-                onChange={setModelKey}
-                groups={[
-                  { label: "Local", options: localVideoModels.map((m) => ({ value: m.key, label: m.label })) },
-                  { label: "Remote", options: remoteVideoModels.map((m) => ({ value: m.key, label: m.label })) },
-                ]}
-                placeholder="Select a model"
-              />
-              {selectedModel && (
-                <p className="text-xs text-zinc-500">
-                  {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
-                  {selectedModel.size}px
-                  {selectedModel.quantized && " · 4-bit quantized"}
-                  {selectedModel.remote && " · remote"}
-                </p>
-              )}
-              {selectedModel && selectedModel.remote && (
-                <p className="text-xs text-zinc-500">{selectedModel.repo}</p>
-              )}
-              {selectedModel && !selectedModel.remote && (
-                <DownloadButton
-                  status={getStatus(selectedModel.key)}
-                  onDownload={() => downloadModel(selectedModel.key)}
-                />
-              )}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-zinc-300">Model</label>
+            <CustomSelect
+              value={modelKey}
+              onChange={setModelKey}
+              groups={videoGroups}
+              placeholder="Select a model"
+            />
+            {selectedModel && (
               <p className="text-xs text-zinc-500">
-                {selectedModel?.kind === "video"
-                  ? selectedModel?.remote
-                    ? "Generates via free online inference API — no local download. Results may be rate-limited."
-                    : "Generates video frames directly from the prompt using a distilled T2V model. Slower on CPU, better motion."
-                  : "Generates a few keyframes, then uses motion-compensated interpolation for a smooth clip. Fast and CPU-friendly — no extra model download."}
+                {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
+                {selectedModel.size}px
+                {selectedModel.quantized && " · 4-bit quantized"}
+                {selectedModel.remote && " · remote"}
               </p>
+            )}
+            {selectedModel && selectedModel.remote && (
+              <p className="text-xs text-zinc-500">{selectedModel.repo}</p>
+            )}
+            <p className="text-xs text-zinc-500">
+              {selectedModel?.kind === "video"
+                ? selectedModel?.remote
+                  ? "Generates via free online inference API — no local download. Results may be rate-limited."
+                  : "Generates video frames directly from the prompt using a distilled T2V model. Slower on CPU, better motion."
+                : "Generates a few keyframes, then uses motion-compensated interpolation for a smooth clip. Fast and CPU-friendly — no extra model download."}
+            </p>
 
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
-                  <Clock size={14} />
-                  Duration
-                </label>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
+                <Clock size={14} />
+                Duration
+              </label>
               <CustomSelect
                 value={duration.toString()}
                 onChange={(v) => setDuration(Number(v))}
-                groups={[
-                  {
-                    label: "Duration",
-                    options: [
-                      { value: "2", label: "2 seconds" },
-                      { value: "4", label: "4 seconds" },
-                      { value: "5", label: "5 seconds" },
-                      { value: "8", label: "8 seconds" },
-                      { value: "10", label: "10 seconds" },
-                      { value: "12", label: "12 seconds" },
-                    ],
-                  },
-                ]}
+                groups={[{ label: "Duration", options: DURATION_OPTIONS }]}
                 placeholder="Select duration"
               />
-                <p className="text-xs text-zinc-500">
-                  {duration * 12} frames at 12 fps
-                </p>
-              </div>
+              <p className="text-xs text-zinc-500">
+                {duration * 12} frames at 12 fps
+              </p>
             </div>
+          </div>
 
           <details className="text-sm text-zinc-400 group">
             <summary className="cursor-pointer font-medium text-zinc-300 select-none">Advanced settings</summary>

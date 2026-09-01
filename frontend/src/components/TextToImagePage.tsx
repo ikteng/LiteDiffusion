@@ -8,27 +8,6 @@ import SettingsPanel from "./SettingsPanel";
 import GalleryTab from "./GalleryTab";
 import CustomSelect from "./CustomSelect";
 
-function DownloadButton({ status, onDownload }: { status: string; onDownload: () => void }) {
-  if (status === "ready") {
-    return <p className="text-xs text-emerald-400">Downloaded</p>;
-  }
-  if (status === "downloading") {
-    return (
-      <p className="text-xs text-zinc-400 flex items-center gap-1">
-        <Loader2 size={12} className="animate-spin" /> Downloading...
-      </p>
-    );
-  }
-  return (
-    <button
-      onClick={onDownload}
-      className="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1 cursor-pointer"
-    >
-      <Download size={12} /> Download model
-    </button>
-  );
-}
-
 const EXAMPLE_PROMPTS = [
   "A watercolor fox in a snowy forest",
   "Neon-lit cyberpunk alley in the rain",
@@ -63,7 +42,6 @@ export default function TextToImagePage() {
             label: m.label,
             downloadStatus: status === "ready" ? undefined : status,
             onDownload: () => downloadModel(m.key),
-            disabled: false,
           };
         }),
     },
@@ -138,7 +116,7 @@ export default function TextToImagePage() {
 
           <div className="flex flex-col gap-1.5">
             <label className="text-sm font-medium text-zinc-300">Model</label>
-              <CustomSelect
+            <CustomSelect
               value={modelKey}
               onChange={setModelKey}
               groups={imageGroups}
@@ -153,12 +131,6 @@ export default function TextToImagePage() {
             )}
             {selectedModel && selectedModel.remote && (
               <p className="text-xs text-zinc-500">{selectedModel.repo}</p>
-            )}
-            {selectedModel && !selectedModel.remote && (
-              <DownloadButton
-                status={getStatus(selectedModel.key)}
-                onDownload={() => downloadModel(selectedModel.key)}
-              />
             )}
           </div>
 
