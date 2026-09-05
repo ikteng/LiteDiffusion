@@ -9,6 +9,13 @@ import GalleryTab from "./GalleryTab";
 import CustomSelect from "./CustomSelect";
 import SettingsPanel from "./SettingsPanel";
 
+const MOTION_PROMPTS = [
+  "Camera slowly pushes in, gentle breeze",
+  "Leaves drift in the wind, soft lighting",
+  "Slow pan across the scene, cinematic",
+  "Subtle zoom out, warm sunlight",
+];
+
 const DURATION_OPTIONS = [
   { value: "2", label: "2 seconds" },
   { value: "4", label: "4 seconds" },
@@ -16,6 +23,15 @@ const DURATION_OPTIONS = [
   { value: "8", label: "8 seconds" },
   { value: "10", label: "10 seconds" },
   { value: "12", label: "12 seconds" },
+];
+
+const I2V_PIPELINES = [
+  "LTXImageToVideoPipeline",
+  "Kandinsky5I2VPipeline",
+  "WanImageToVideoPipeline",
+  "I2VGenXLPipeline",
+  "SV3DPipeline",
+  "StableVideoDiffusionPipeline",
 ];
 
 export default function ImageToVideoPage({ mode }: { mode: "single" | "first-last" }) {
@@ -39,17 +55,19 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
   const isRunning = job?.status === "queued" || job?.status === "running";
   const selectedModel = models.find((m) => m.key === modelKey);
   const { downloadModel, getStatus } = useModelDownloads();
-  const supportsEndFrame = selectedModel?.pipeline === "LTXImageToVideoPipeline";
-  const showEndFrame = mode === "first-last" && supportsEndFrame;
+  const supportsEndFrame = mode === "first-last" && selectedModel?.pipeline === "LTXImageToVideoPipeline";
+  const promptRequired = selectedModel?.requires_prompt ?? true;
 
-  const eligibleModels = models.filter(
-    (m) => m.kind === "image_to_video" && !m.remote && (mode !== "first-last" || m.pipeline === "LTXImageToVideoPipeline")
+  const i2vModels = models.filter(
+    (m) =>
+      I2V_PIPELINES.includes(m.pipeline) &&
+      !m.remote &&
+      (mode !== "first-last" || m.pipeline === "LTXImageToVideoPipeline")
   );
-
   const modelGroups = [
     {
       label: "",
-      options: sortModelsBySize(eligibleModels).map((m) => {
+      options: sortModelsBySize(i2vModels).map((m) => {
         const status = getStatus(m.key) as "idle" | "downloading" | "ready";
         return {
           value: m.key,
@@ -65,23 +83,30 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
   useEffect(() => {
     api.getModels().then((res) => {
       setModels(res.models);
-      const i2vModels = res.models.filter((m) => m.kind === "image_to_video");
-      const defaultModel = i2vModels.find((m) => m.label.includes("Recommended")) || i2vModels[0];
-      setModelKey(defaultModel?.key ?? "");
+      updateDefaultModel(res.models);
     });
   }, []);
 
   useEffect(() => {
-    if (models.length === 0) return;
-    if (mode === "first-last") {
-      const current = models.find((m) => m.key === modelKey);
-      if (current && current.pipeline !== "LTXImageToVideoPipeline") {
-        const ltx = models.find((m) => m.kind === "image_to_video" && m.pipeline === "LTXImageToVideoPipeline");
-        setModelKey(ltx?.key ?? "");
-      }
+    if (models.length > 0) {
+      updateDefaultModel(models);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, models]);
+  }, [mode]);
+
+  function updateDefaultModel(allModels: ModelInfo[]) {
+    const available = allModels.filter(
+      (m) =>
+        I2V_PIPELINES.includes(m.pipeline) &&
+        !m.remote &&
+        (mode !== "first-last" || m.pipeline === "LTXImageToVideoPipeline")
+    );
+    const current = available.find((m) => m.key === modelKey);
+    if (!current && available.length > 0) {
+      const def = available.find((m) => m.label.includes("Recommended")) || available[0];
+      setModelKey(def?.key ?? "");
+    }
+  }
 
   useEffect(() => {
     if (job?.status === "succeeded") {
@@ -92,21 +117,16 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
   useEffect(() => {
     return () => {
       if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
-    };
-  }, [imagePreviewUrl]);
-
-  useEffect(() => {
-    return () => {
       if (endImagePreviewUrl) URL.revokeObjectURL(endImagePreviewUrl);
     };
-  }, [endImagePreviewUrl]);
+  }, [imagePreviewUrl, endImagePreviewUrl]);
 
   useEffect(() => {
-    if (!showEndFrame) {
+    if (!supportsEndFrame) {
       handleEndFileSelect(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showEndFrame]);
+  }, [supportsEndFrame]);
 
   function handleFileSelect(file: File | null) {
     if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
@@ -127,23 +147,23 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
     setEndImageFile(file);
   }
 
-  const promptRequired = selectedModel?.requires_prompt ?? true;
-  const canGenerate = (!promptRequired || prompt.trim()) && imageFile && (mode !== "first-last" || endImageFile);
+  const canGenerate = (!promptRequired || prompt.trim()) && imageFile;
 
   async function handleGenerate() {
     if (!canGenerate || isRunning) return;
     setSubmitError(null);
     try {
       const formData = new FormData();
-      formData.append("image", imageFile);
-      if (showEndFrame && endImageFile) {
-        formData.append("end_image", endImageFile);
-      }
       formData.append("prompt", prompt);
       formData.append("model", modelKey);
       formData.append("seed", randomSeed ? "-1" : seed.toString());
+      formData.append("media_type", "video");
       formData.append("duration", duration.toString());
-      const res = await api.generateImageToVideo(formData);
+      if (imageFile) formData.append("image", imageFile);
+      if (supportsEndFrame && endImageFile) {
+        formData.append("end_image", endImageFile);
+      }
+      const res = await api.generate(formData);
       setJobId(res.id);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to submit job");
@@ -164,8 +184,9 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="flex flex-col gap-4 bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-zinc-300">
-              {mode === "first-last" ? "First frame" : "Reference image"}
+            <label className="text-sm font-medium text-zinc-300 flex items-center justify-between">
+              <span>Start image</span>
+              <span className="text-xs text-violet-400 font-medium">Required</span>
             </label>
             <input
               ref={fileInputRef}
@@ -178,7 +199,7 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
               <div className="relative w-fit">
                 <img
                   src={imagePreviewUrl}
-                  alt="Reference preview"
+                  alt="Start frame preview"
                   className="rounded-lg max-h-48 border border-zinc-800"
                 />
                 <button
@@ -195,77 +216,81 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-zinc-700 hover:border-zinc-600 rounded-lg py-6 text-zinc-500 hover:text-zinc-300 cursor-pointer transition-colors"
+                className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-zinc-700 hover:border-zinc-600 rounded-lg py-8 text-zinc-500 hover:text-zinc-300 cursor-pointer transition-colors"
               >
-                <Upload size={20} />
+                <Upload size={24} />
                 <span className="text-sm">Click to upload an image</span>
               </button>
             )}
           </div>
 
-          {mode === "first-last" && (
+          {supportsEndFrame && (
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium text-zinc-300">Last frame</label>
-              {!supportsEndFrame ? (
-                <p className="text-xs text-zinc-500 bg-zinc-800/50 rounded-lg px-3 py-2">
-                  Select an LTX-Video model above to use first + last frame mode.
-                </p>
-              ) : (
-                <>
-                  <input
-                    ref={endFileInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => handleEndFileSelect(e.target.files?.[0] ?? null)}
+              <label className="text-sm font-medium text-zinc-300">End image (optional)</label>
+              <input
+                ref={endFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => handleEndFileSelect(e.target.files?.[0] ?? null)}
+              />
+              {endImagePreviewUrl ? (
+                <div className="relative w-fit">
+                  <img
+                    src={endImagePreviewUrl}
+                    alt="End frame preview"
+                    className="rounded-lg max-h-48 border border-zinc-800"
                   />
-                  {endImagePreviewUrl ? (
-                    <div className="relative w-fit">
-                      <img
-                        src={endImagePreviewUrl}
-                        alt="End frame preview"
-                        className="rounded-lg max-h-48 border border-zinc-800"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleEndFileSelect(null)}
-                        title="Remove end frame"
-                        aria-label="Remove end frame"
-                        className="absolute -top-2 -right-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-full p-1 cursor-pointer border border-zinc-700"
-                      >
-                        <X size={13} />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => endFileInputRef.current?.click()}
-                      className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-zinc-700 hover:border-zinc-600 rounded-lg py-6 text-zinc-500 hover:text-zinc-300 cursor-pointer transition-colors"
-                    >
-                      <Upload size={20} />
-                      <span className="text-sm">Click to upload the last frame</span>
-                    </button>
-                  )}
-                </>
+                  <button
+                    type="button"
+                    onClick={() => handleEndFileSelect(null)}
+                    title="Remove end image"
+                    aria-label="Remove end image"
+                    className="absolute -top-2 -right-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-full p-1 cursor-pointer border border-zinc-700"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => endFileInputRef.current?.click()}
+                  className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-zinc-700 hover:border-zinc-600 rounded-lg py-6 text-zinc-500 hover:text-zinc-300 cursor-pointer transition-colors"
+                >
+                  <Upload size={20} />
+                  <span className="text-sm">Click to upload the end frame</span>
+                </button>
               )}
+              <p className="text-xs text-zinc-500">
+                Only available for LTX-Video. Animates between the start and end frame.
+              </p>
             </div>
           )}
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-zinc-300">
-              Prompt {!promptRequired && <span className="text-zinc-500 font-normal">(optional)</span>}
+            <label className="text-sm font-medium text-zinc-300 flex items-center justify-between">
+              <span>{promptRequired ? "Motion prompt" : "Prompt (optional)"}</span>
+              {!promptRequired && <span className="text-xs text-zinc-500">Not used by this model</span>}
             </label>
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder={
-                promptRequired
-                  ? "Describe the motion you want, e.g. gentle wind, slow zoom in"
-                  : "This model animates the image directly — a prompt isn't required"
-              }
+              placeholder="Describe the motion you want, e.g. gentle wind, slow zoom in"
               rows={3}
               className="bg-zinc-800 rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-violet-600 placeholder:text-zinc-600"
             />
+            <div className="flex flex-wrap gap-1.5">
+              {MOTION_PROMPTS.map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setPrompt(p)}
+                  className="text-xs text-zinc-400 bg-zinc-800/70 hover:bg-zinc-800 hover:text-zinc-200 rounded-full px-2.5 py-1 transition-colors cursor-pointer"
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -281,8 +306,20 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
                 {selectedModel.steps} step{selectedModel.steps === 1 ? "" : "s"} · {selectedModel.size}×
                 {selectedModel.size}px
                 {selectedModel.approx_size_mb > 0 && ` · ${formatModelSize(selectedModel.approx_size_mb)}`}
+                {selectedModel.quantized && " · 4-bit quantized"}
+                {selectedModel.remote && " · remote"}
               </p>
             )}
+            {selectedModel && selectedModel.remote && (
+              <p className="text-xs text-zinc-500">{selectedModel.repo}</p>
+            )}
+            <p className="text-xs text-zinc-500">
+              {selectedModel?.remote
+                ? selectedModel?.provider === "pollinations"
+                  ? "Generates via Pollinations.ai — free, no API token required, no local download."
+                  : "Generates via Hugging Face Inference API — requires HF token, free tier rate-limited."
+                : "Animates your start image into a short video clip, guided by your motion prompt."}
+            </p>
 
             <div className="flex flex-col gap-1.5">
               <label className="text-sm font-medium text-zinc-300 flex items-center gap-2">
@@ -295,6 +332,9 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
                 groups={[{ label: "Duration", options: DURATION_OPTIONS }]}
                 placeholder="Select duration"
               />
+              <p className="text-xs text-zinc-500">
+                {duration * 12} frames at 12 fps
+              </p>
             </div>
           </div>
 
@@ -405,13 +445,13 @@ export default function ImageToVideoPage({ mode }: { mode: "single" | "first-las
           {!job && (
             <div className="flex flex-col items-center gap-2 text-zinc-600">
               <Sparkles size={28} />
-              <p className="text-sm">Your clip will appear here</p>
+              <p className="text-sm">Your video will appear here</p>
             </div>
           )}
         </div>
       </div>
 
-      <SettingsPanel kind="image_to_video" />
+      <SettingsPanel kind="video" excludePipelines={I2V_PIPELINES} />
 
       <GalleryTab refreshKey={galleryRefreshKey} />
     </div>

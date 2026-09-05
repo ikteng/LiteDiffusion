@@ -24,6 +24,7 @@ def list_models():
             "remote": value.get("remote", False),
             "provider": value.get("provider", "local"),
             "approx_size_mb": model_sizes.get_size_mb(key) if not value.get("remote") else 0,
+            "requires_prompt": value.get("requires_prompt", True),
         }
         for key, value in config.MODELS.items()
     ]

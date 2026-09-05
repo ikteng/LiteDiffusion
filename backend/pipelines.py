@@ -289,36 +289,78 @@ def generate_video(
     if model_config.get("kind") == "video":
         pipe = load_pipeline(model_key)
         frame_gen = torch.Generator(device=config.DEVICE).manual_seed(base_seed)
-        call_kwargs = dict(
-            num_inference_steps=model_config["steps"],
-            guidance_scale=model_config["guidance_scale"],
-            height=size,
-            width=size,
-            generator=frame_gen,
-        )
-        if requires_prompt:
-            call_kwargs["prompt"] = prompt
-        if model_config.get("frame_arg") == "frames":
-            call_kwargs["frames"] = frame_count
-        else:
-            call_kwargs["num_frames"] = frame_count
 
-        if reference_image:
+        pipeline_type = model_config.get("pipeline", "")
+
+        if pipeline_type == "SV3DPipeline":
+            if not reference_image:
+                raise ValueError("SV3D models require a reference image.")
             start_img = Image.open(reference_image).convert("RGB").resize((size, size))
-            if end_image and model_config.get("pipeline") == "LTXImageToVideoPipeline":
-                end_img = Image.open(end_image).convert("RGB").resize((size, size))
-                call_kwargs["image"] = [start_img, end_img]
-                call_kwargs["frame_index"] = [0, frame_count - 1]
+            num_views = min(frame_count, 16)
+            result = pipe(
+                image=start_img,
+                prompt=prompt if requires_prompt else "",
+                num_views=num_views,
+                generator=frame_gen,
+            )
+            frames = [f if hasattr(f, "save") else Image.fromarray(f) for f in result.images]
+            frames = [f.convert("RGB") for f in frames]
+        elif pipeline_type == "StableVideoDiffusionPipeline":
+            if not reference_image:
+                raise ValueError("SVD models require a reference image.")
+            start_img = Image.open(reference_image).convert("RGB").resize((size, size))
+            accepted_params = inspect.signature(pipe.__call__).parameters
+            svd_kwargs = {}
+            if "image" in accepted_params:
+                svd_kwargs["image"] = start_img
+            if "num_frames" in accepted_params:
+                svd_kwargs["num_frames"] = frame_count
+            if "num_inference_steps" in accepted_params:
+                svd_kwargs["num_inference_steps"] = model_config["steps"]
+            guidance = model_config["guidance_scale"]
+            for gk_name in ("min_guidance_scale", "guidance_scale", "max_guidance_scale"):
+                if gk_name in accepted_params:
+                    svd_kwargs[gk_name] = guidance
+            if "generator" in accepted_params:
+                svd_kwargs["generator"] = frame_gen
+            if "height" in accepted_params:
+                svd_kwargs["height"] = size
+            if "width" in accepted_params:
+                svd_kwargs["width"] = size
+            result = pipe(**svd_kwargs)
+            frames = _extract_frames(result)
+        else:
+            call_kwargs = dict(
+                num_inference_steps=model_config["steps"],
+                guidance_scale=model_config["guidance_scale"],
+                height=size,
+                width=size,
+                generator=frame_gen,
+            )
+            if requires_prompt:
+                call_kwargs["prompt"] = prompt
+            if model_config.get("frame_arg") == "frames":
+                call_kwargs["frames"] = frame_count
             else:
-                call_kwargs["image"] = start_img
+                call_kwargs["num_frames"] = frame_count
 
-        accepted_params = inspect.signature(pipe.__call__).parameters
-        call_kwargs = {k: v for k, v in call_kwargs.items() if k in accepted_params}
+            if reference_image:
+                start_img = Image.open(reference_image).convert("RGB").resize((size, size))
+                if end_image and model_config.get("pipeline") == "LTXImageToVideoPipeline":
+                    end_img = Image.open(end_image).convert("RGB").resize((size, size))
+                    call_kwargs["image"] = [start_img, end_img]
+                    call_kwargs["frame_index"] = [0, frame_count - 1]
+                else:
+                    call_kwargs["image"] = start_img
 
-        result = pipe(**call_kwargs)
-        if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("Cancelled by user")
-        frames = _extract_frames(result)
+            accepted_params = inspect.signature(pipe.__call__).parameters
+            call_kwargs = {k: v for k, v in call_kwargs.items() if k in accepted_params}
+
+            result = pipe(**call_kwargs)
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Cancelled by user")
+            frames = _extract_frames(result)
+
         actual_fps = fps
         config.VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
         file_path = config.VIDEOS_DIR / f"{abs(base_seed)}_{int(time.time() * 1000)}.mp4"

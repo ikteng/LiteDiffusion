@@ -25,6 +25,13 @@ const DURATION_OPTIONS = [
   { value: "12", label: "12 seconds" },
 ];
 
+const I2V_PIPELINES = [
+  "LTXImageToVideoPipeline",
+  "Kandinsky5I2VPipeline",
+  "WanImageToVideoPipeline",
+  "I2VGenXLPipeline",
+];
+
 export default function TextToVideoPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [prompt, setPrompt] = useState("");
@@ -44,7 +51,7 @@ export default function TextToVideoPage() {
   const videoGroups = [
     {
       label: "",
-      options: sortModelsBySize(models.filter((m) => m.kind === "video" && !m.remote))
+      options: sortModelsBySize(models.filter((m) => m.kind === "video" && !m.remote && !I2V_PIPELINES.includes(m.pipeline)))
         .map((m) => {
           const status = getStatus(m.key) as "idle" | "downloading" | "ready";
           return {
@@ -61,8 +68,8 @@ export default function TextToVideoPage() {
   useEffect(() => {
     api.getModels().then((res) => {
       setModels(res.models);
-      const videoModels = res.models.filter((m) => m.kind === "video");
-      const defaultModel = videoModels.find((m) => m.label.includes("Recommended")) || videoModels[0];
+      const t2vModels = res.models.filter((m) => m.kind === "video" && !m.remote && !I2V_PIPELINES.includes(m.pipeline));
+      const defaultModel = t2vModels.find((m) => m.label.includes("Recommended")) || t2vModels[0];
       setModelKey(defaultModel?.key ?? "");
     });
   }, []);
@@ -147,13 +154,11 @@ export default function TextToVideoPage() {
               <p className="text-xs text-zinc-500">{selectedModel.repo}</p>
             )}
             <p className="text-xs text-zinc-500">
-              {selectedModel?.kind === "video"
-                ? selectedModel?.remote
-                  ? selectedModel?.provider === "pollinations"
-                    ? "Generates via Pollinations.ai — free, no API token required, no local download."
-                    : "Generates via Hugging Face Inference API — requires HF token, free tier rate-limited."
-                  : "Generates video frames directly from the prompt using a distilled T2V model. Slower on CPU, better motion."
-                : "Generates a few keyframes, then uses motion-compensated interpolation for a smooth clip. Fast and CPU-friendly — no extra model download."}
+              {selectedModel?.kind === "video" && selectedModel?.remote
+                ? selectedModel?.provider === "pollinations"
+                  ? "Generates via Pollinations.ai — free, no API token required, no local download."
+                  : "Generates via Hugging Face Inference API — requires HF token, free tier rate-limited."
+                : "Generates video frames directly from the prompt using a distilled T2V model. Slower on CPU, better motion."}
             </p>
 
             <div className="flex flex-col gap-1.5">
@@ -290,7 +295,7 @@ export default function TextToVideoPage() {
         </div>
       </div>
 
-      <SettingsPanel kind="video" />
+      <SettingsPanel kind="video" excludePipelines={I2V_PIPELINES} />
 
       <GalleryTab refreshKey={galleryRefreshKey} />
     </div>

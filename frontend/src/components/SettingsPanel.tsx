@@ -4,7 +4,10 @@ import { api } from "../api";
 import type { ModelInfo, SettingsResponse } from "../types";
 import { formatModelSize, sortModelsBySize } from "../utils";
 
-export default function SettingsPanel({ kind = "image" }: { kind?: "image" | "video" | "image_to_video" }) {
+export default function SettingsPanel({
+  kind = "image",
+  excludePipelines,
+}: { kind?: "image" | "video"; excludePipelines?: string[] }) {
   const [open, setOpen] = useState(false);
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -12,7 +15,9 @@ export default function SettingsPanel({ kind = "image" }: { kind?: "image" | "vi
   useEffect(() => {
     api.getSettings().then(setSettings);
     api.getModels().then((res) => {
-      const filtered = res.models.filter((m) => m.kind === kind);
+      const filtered = res.models.filter(
+        (m) => m.kind === kind && (!excludePipelines || !excludePipelines.includes(m.pipeline))
+      );
       const local = sortModelsBySize(filtered.filter((m) => !m.remote));
       const remote = filtered.filter((m) => m.remote);
       setModels([...local, ...remote]);

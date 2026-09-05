@@ -2,31 +2,39 @@
 
 A local text-to-image app: a FastAPI backend around small, distilled diffusion models, with a React/TypeScript
 frontend (Generate, Gallery, Settings, About tabs). Runs entirely on your own machine — no cloud billing, no
-time-limited hosted quota.
+time-limited hosted quota. Text-to-image models are small (≤2.5GB) and CPU-friendly; video models are heavier
+(13-28GB) and benefit from an NVIDIA GPU.
 
 ## Models
 
 | model | type | notes |
 |---|---|---|
-| [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | local image | Smallest and fastest; built specifically for real-time generation. **Default.** |
-| [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo) | local image | Distilled SD2.1; best quality of the local options, still single-step. |
-| [`nota-ai/bk-sdm-tiny`](https://huggingface.co/nota-ai/bk-sdm-tiny) | local image | Block-pruned + distilled SD1.4, ~0.5B params; smallest SD-architecture option. |
-| [`ali-vilab/text-to-video-ms-1.7b`](https://huggingface.co/ali-vilab/text-to-video-ms-1.7b) | local video | 1.7B parameter text-to-video model; smallest local video download. **Default.** |
-| [`kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s`](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s-Diffusers) | local video | 2B parameter distilled T2V, 16 steps. |
-| [`kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s`](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s-Diffusers) | local video | 2B parameter no-CFG balanced T2V. |
+| [`IDKiro/sdxs-512-0.9`](https://huggingface.co/IDKiro/sdxs-512-0.9) | local image | 1-step SDXL; fastest model, good for real-time. **Default.** |
+| [`tianweiy/DMD2`](https://huggingface.co/tianweiy/DMD2) | local image | 4-step SDXL distilled; good quality with few steps. |
+| [`latent-consistency/lcm-lora-sdxl`](https://huggingface.co/latent-consistency/lcm-lora-sdxl) | local image | 1-2 step LCM-LoRA SDXL; dreamy aesthetic, very fast. |
+| [`Efficient-Large-Model/Sana_600M_512px`](https://huggingface.co/Efficient-Large-Model/Sana_600M_512px_diffusers) | local image | 0.6B param, 8-step; tiny and sharp. |
+| [`PixArt-alpha/PixArt-Sigma-XL-2-512-MS`](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-512-MS) | local image | 0.6B param, 6-step; small and detailed. |
+| [`stabilityai/sdxl-turbo`](https://huggingface.co/stabilityai/sdxl-turbo) | local image | 1-step SDXL; best quality at speed, ~2.3GB. |
+| [`ali-vilab/text-to-video-ms-1.7b`](https://huggingface.co/ali-vilab/text-to-video-ms-1.7b) | local video | 1.7B param T2V; smallest local video download. **Default.** |
+| [`Lightricks/LTX-Video`](https://huggingface.co/Lightricks/LTX-Video) | local video | LTX-Video 2B; 30-step, 512px T2V, fast on GPU. |
+| [`Lightricks/LTX-Video`](https://huggingface.co/Lightricks/LTX-Video) | local video (I2V) | LTX-Video 2B image-to-video — good quality, supports first+last frame. **Recommended.** |
+| [`ali-vilab/i2vgen-xl`](https://huggingface.co/ali-vilab/i2vgen-xl) | local video (I2V) | Lightweight 1.3B image-to-video model — smallest local video download. |
+| [`stabilityai/sv3d`](https://huggingface.co/stabilityai/sv3d) | local video (I2V) | 2.5B image-to-3D (multi-view), CPU-friendly, small download. |
+| [`stabilityai/sv3d_humin3d`](https://huggingface.co/stabilityai/sv3d_humin3d) | local video (I2V) | 3.2B image-to-3D optimized for human figures, CPU-friendly. |
+| [`stabilityai/svd`](https://huggingface.co/stabilityai/svd) | local video (I2V) | ~1.2B Param I2V (Stable Video Diffusion); smallest local I2V download. **Recommended.** |
+| [`stabilityai/svd_xt`](https://huggingface.co/stabilityai/svd_xt) | local video (I2V) | SVD extended — 14-frame, higher quality variant. |
 | [`stabilityai/stable-diffusion-xl-base-1.0`](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) | online image | Free online inference via Hugging Face API — no local download. |
 | [`runwayml/stable-diffusion-v1-5`](https://huggingface.co/runwayml/stable-diffusion-v1-5) | online image | Free online inference via Hugging Face API — no local download. |
-| [`ali-vilab/text-to-video-ms-1.7b`](https://huggingface.co/ali-vilab/text-to-video-ms-1.7b) | online video | Free online inference via Hugging Face API — no local download. |
-| [`guoyww/animatediff`](https://huggingface.co/guoyww/animatediff) | online video | Free online inference via Hugging Face API — no local download. |
 
-Local models run through `diffusers.DiffusionPipeline` (or specialized pipelines for T2V). The backend auto-detects a CUDA GPU
+Local models run through `diffusers.DiffusionPipeline` (or specialized pipelines for video). The backend auto-detects a CUDA GPU
 (`torch.cuda.is_available()`) and uses it in FP16 if present, otherwise falls back to FP32 on CPU. Each pipeline
 is loaded lazily on first use and kept in memory for the rest of the session. Only the default model
 (`sdxs-512`) is prefetched at startup; heavier models download on first selection.
 
-Video generation uses the chosen image model to render a few keyframes, then ffmpeg motion-compensated interpolation
-produces a smooth MP4 — fast and CPU-friendly, with no extra model download. Local T2V models generate frames directly
-for better motion. Or use any remote option for online inference without downloading weights.
+Video generation has two pages: Text-to-Video for prompt-only generation using T2V models, and
+Image-to-Video for animating a reference image with I2V models (text + image). The Image-to-Video page
+supports an optional last frame for first+last-frame control on LTX-Video. All video models run locally;
+heavier checkpoints download on first selection.
 
 ## Running locally
 
@@ -74,9 +82,8 @@ The dev server proxies `/api` and `/outputs` requests to the FastAPI server.
 - `frontend/` — Vite + React + TypeScript SPA, built to `frontend/dist/` and served by the backend.
 - `run.py` — single entrypoint for normal use.
 
-The job/history data model carries a `media_type` field (`image` or `video`). Image generation uses the
-local or remote models above. Video generation can use remote online inference or local keyframe interpolation
-depending on the selected model.
+The job/history data model carries a `media_type` field (`image` or `video`). Image generation uses the local
+models above. Video generation uses the Image-to-Video page with an I2V model that animates a reference image you provide.
 
 ## Why not MiniMax-H3
 
